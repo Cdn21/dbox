@@ -1,0 +1,14 @@
+# Exemple de manifeste : une app, deux cibles, deux URL.
+
+name = "budget"
+
+[targets.dev]
+mode = "workspace"        # bascule en "devcontainer" quand tu veux : une ligne
+command = "npm run dev"
+port = 5178
+# → https://budget-dev.<tailnet>.ts.net
+
+[targets.prod]
+mode = "deployed"
+port = 8080
+# → https://budget.<tailnet>.ts.net

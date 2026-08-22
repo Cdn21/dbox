@@ -1,0 +1,22 @@
+{
+  "name": "dbox",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-host chez soi : tu poses ton code, DBox s'occupe du réseau.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "dbox": "./src/cli.ts"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "plan": "node src/cli.ts plan"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "typescript": "7.0.2"
+  }
+}
