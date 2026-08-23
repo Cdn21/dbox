@@ -1,0 +1,231 @@
+# Déploiement de DBox par lui-même — écrit à la main, exprès.
+#
+# Pourquoi ce fichier n'est pas généré par `dbox up` : le daemon a besoin du
+# socket Docker et d'un montage de l'hôte. Ajouter un champ « montages » au
+# manifeste donnerait à **n'importe quelle app** le moyen de réclamer le socket,
+# c'est-à-dire root sur la machine. On refuse ce champ, et on assume que DBox
+# s'amorce par un compose lisible et versionné — comme un compilateur qui a
+# besoin d'un premier binaire qu'il n'a pas produit.
+#
+# Variables à poser dans un .env à côté de ce fichier — seules DBOX_TAILNET
+# et DBOX_HOME sont obligatoires (le fichier refuse de démarrer sans elles,
+# plutôt que de deviner un chemin qui ne serait pas le tien) ; les autres ont
+# des défauts, la plupart dérivés de DBOX_HOME :
+#
+# ⚠️ Le message d'erreur `${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}`
+# est répété tel quel une quinzaine de fois ci-dessous — Compose n'offre pas
+# de moyen de le factoriser à l'intérieur d'une interpolation. En changer le
+# texte veut dire le changer partout à l'identique (`grep -c` pour vérifier
+# le compte avant/après).
+#   DBOX_TAILNET  domaine du tailnet, obligatoire (ex. mon-tailnet.ts.net)
+#   DBOX_HOME     racine des données DBox sur l'hôte, obligatoire
+#   DBOX_PORT     port interne du daemon (défaut 8099)
+#   DBOX_TSTAG    tag ACL des apps redéployées (défaut tag:dbox)
+#   DBOX_POLL_INTERVAL    sondage des cibles auto_deploy, en secondes (défaut
+#                         300 ; 0 désactive le sondage entièrement)
+#   DBOX_SSH      dossier .ssh monté pour cloner des dépôts privés (défaut ~/.ssh)
+#   DBOX_AUTHKEY  fichier de clé Tailscale semé dans chaque nouvelle cible
+#   DBOX_ADMIN_AUTHKEY    marqueur d'échéance de la clé du daemon lui-même
+#                         (tag:dbox-admin, posée dans ts.env) — distinct de
+#                         DBOX_AUTHKEY, jamais lu autrement que <fichier>.expires
+#   DBOX_UID / DBOX_GID   identité du daemon (défaut 1000:1000 — le premier
+#                         utilisateur non-root sur la plupart des distributions)
+#   DBOX_DOCKER_GID       GID du groupe « docker » sur l'hôte (`getent group docker`)
+#   DBOX_HOSTNAME         nom du nœud tailnet du daemon (défaut dbox) — change
+#                         sur toute machine autre que la première : deux
+#                         daemons ne peuvent pas s'appeler pareil sur le tailnet.
+#   DBOX_SSH_KEY          clé SSH dédiée aux clonages (défaut : à côté de la
+#                         clé Tailscale) — absent du montage tant qu'elle n'a
+#                         pas été générée depuis le tableau de bord.
+#   DBOX_MACHINES         liste des autres machines DBox connues (défaut : à
+#                         côté de la clé Tailscale) — gérée depuis /settings,
+#                         jamais à la main.
+#   DBOX_WORKSPACES       racine des dossiers locaux déployables sans clonage
+#                         (ex. ~/Documents/dev) — absente : « ajouter » depuis
+#                         l'interface ne propose que le clonage git, jamais un
+#                         dossier local. Choix propre à chaque machine, aucun
+#                         défaut qui ferait deviner où vivent tes projets.
+#   DBOX_API_TOKEN        token d'accès API Tailscale, pour le service
+#                         authkey-rotator ci-dessous — jamais lu par le
+#                         daemon, jamais monté dedans.
+#   DBOX_ROTATE_INTERVAL  intervalle de vérification en secondes (défaut
+#                         86400, une fois par jour) — une régénération ne se
+#                         déclenche que si l'échéance approche vraiment.
+#   DBOX_ORPHANS_REPORT   rapport des nœuds Tailscale abandonnés, écrit par
+#                         authkey-rotator, lu par daemon pour /settings —
+#                         partagé via le même $DBOX_HOME que les deux voient
+#                         déjà chacun de leur côté.
+#   DBOX_TAG_REPORT       rapport de présence de DBOX_TSTAG dans tagOwners,
+#                         même principe que DBOX_ORPHANS_REPORT.
+
+name: dbox-daemon
+
+services:
+  daemon:
+    image: dbox/daemon:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    # Node en PID 1 ne récupère pas les petits-enfants orphelins (un
+    # sous-processus qui forkerait un enfant lui survivant) — protection à
+    # coût nul contre une accumulation de zombies, même si les sous-processus
+    # actuels (docker, git, docker compose) ne le déclenchent pas en pratique.
+    init: true
+    command:
+      - serve
+      - --root
+      - ${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/apps
+      - --port
+      - "${DBOX_PORT:-8099}"
+      # Sans lui, le daemon fabriquerait des URL avec le gabarit non substitué.
+      - --tailnet
+      - "${DBOX_TAILNET:?renseigner DBOX_TAILNET dans deploy/.env}"
+      # Le tag des apps qu'il redéploie — pas le sien, qui est dbox-admin.
+      - --ts-tag
+      - "${DBOX_TSTAG:-tag:dbox}"
+      # Sans lui, « ajouter une app » cloneraient dans /opt/dbox : le conteneur
+      # n'a pas accès à ~/.config/dbox/config.toml pour connaître le vrai
+      # dossier de sources, contrairement à la CLI lancée sur l'hôte.
+      - --sources
+      - "${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}"
+      # Même raison : sans elle, une app ajoutée depuis l'interface démarre
+      # avec un ts.env vide et son sidecar reste bloqué en attente de connexion
+      # interactive au lieu de s'authentifier tout seul.
+      - --authkey-file
+      - "${DBOX_AUTHKEY:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/authkey}"
+      # Même raison, pour une clé différente : celle du daemon lui-même
+      # (tag:dbox-admin), jamais couverte par --authkey-file qui ne parle que
+      # de la clé semée dans les nouvelles apps.
+      - --admin-authkey-file
+      - "${DBOX_ADMIN_AUTHKEY:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/admin-authkey}"
+      # Même raison, pour un fichier écrit ailleurs : le rapport des nœuds
+      # Tailscale abandonnés, produit par authkey-rotator — sans lui, le
+      # panneau correspondant sur /settings reste invisible.
+      - --orphans-report-file
+      - "${DBOX_ORPHANS_REPORT:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/orphans-report.json}"
+      # Même raison, pour un autre fichier écrit par authkey-rotator : la
+      # présence de DBOX_TSTAG dans tagOwners de la policy Tailscale.
+      - --tag-report-file
+      - "${DBOX_TAG_REPORT:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/tag-report.json}"
+      # Même raison encore : sans lui, le panneau « accès git » du tableau de
+      # bord reste invisible — le conteneur ne peut pas deviner ce chemin en
+      # lisant une config qu'il n'a pas.
+      - --ssh-key-file
+      - "${DBOX_SSH_KEY:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/ssh_key}"
+      # Même raison, encore : sans lui, le sélecteur de machines et le
+      # panneau qui l'édite restent invisibles sur /settings.
+      - --machines-file
+      - "${DBOX_MACHINES:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/machines.json}"
+      # Chaîne vide par défaut, volontairement — contrairement aux autres
+      # options : sans DBOX_WORKSPACES posé, « dossier local » doit rester
+      # absent du formulaire d'ajout, pas retomber sur un chemin deviné.
+      - --workspaces-root
+      - "${DBOX_WORKSPACES:-}"
+      - --poll-interval
+      - "${DBOX_POLL_INTERVAL:-300}"
+    # Pas root : l'image node:24-bookworm-slim définit déjà un utilisateur
+    # « node » en 1000:1000, qui se trouve être l'identité de l'utilisateur
+    # « serve » sur l'hôte. Sans ça, chaque fichier écrit par le daemon — un
+    # dépôt cloné par « ajouter une app », un state.json, un .env — devient
+    # root:root sur le disque, et `serve` ne peut plus le supprimer ni
+    # l'éditer sans sudo, qui demande un mot de passe sur cette machine.
+    user: "${DBOX_UID:-1000}:${DBOX_GID:-1000}"
+    # Toujours équivalent à root sur l'hôte : le groupe donne l'accès au
+    # socket Docker, ce que l'UID seul ne suffit plus à faire une fois qu'on
+    # n'est plus root dans le conteneur.
+    group_add: ["${DBOX_DOCKER_GID:-988}"]
+    environment:
+      # « node » n'est le HOME par défaut que si le shell le déduit du uid ;
+      # Docker ne le fait pas pour nous. git et ssh le lisent explicitement.
+      HOME: /home/node
+    volumes:
+      # Le socket : avec l'appartenance au groupe ci-dessus, plus root, mais
+      # toujours équivalent à root sur l'hôte — Docker ne connaît pas de
+      # frontière plus fine que « peut parler au démon ».
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Au **même chemin** que sur l'hôte : `docker compose build` envoie le
+      # contexte depuis le client, donc depuis ce conteneur. Un chemin différent
+      # et toutes les constructions échoueraient sur un dossier introuvable.
+      - ${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}:${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}
+      # Lecture seule : « ajouter une app » clone par SSH avec la clé de l'hôte,
+      # sans que le conteneur puisse la modifier. Chemin sous $HOME, pas /root :
+      # le processus ne tourne plus en root.
+      - ${DBOX_SSH:-${HOME}/.ssh}:/home/node/.ssh:ro
+      # Retombe sur DBOX_HOME (déjà monté ci-dessus) quand DBOX_WORKSPACES
+      # n'est pas posé — redondant mais inoffensif : --workspaces-root reste
+      # vide dans ce cas, la fonctionnalité reste éteinte malgré ce montage.
+      - ${DBOX_WORKSPACES:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}}:${DBOX_WORKSPACES:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}}
+    restart: unless-stopped
+    networks: [internal]
+
+  tailscale:
+    image: tailscale/tailscale:stable
+    hostname: ${DBOX_HOSTNAME:-dbox}
+    env_file: [./ts.env]
+    environment:
+      TS_HOSTNAME: ${DBOX_HOSTNAME:-dbox}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"
+      TS_SERVE_CONFIG: /config/serve.json
+      # Tag distinct de celui des apps : restreindre l'accès à l'administration
+      # ne doit pas restreindre l'accès à budget, et réciproquement.
+      TS_EXTRA_ARGS: --advertise-tags=tag:dbox-admin
+    volumes:
+      - ts-state:/var/lib/tailscale
+      - ./serve.json:/config/serve.json:ro
+    restart: unless-stopped
+    networks: [internal]
+    depends_on: [daemon]
+
+  # Le seul endroit qui connaît le token d'accès API Tailscale — jamais le
+  # daemon, jamais le sidecar. Trois différences volontaires avec `daemon`,
+  # chacune une frontière : pas de socket Docker (ni le montage, ni
+  # `group_add`), pas de $DBOX_SSH ni $DBOX_WORKSPACES (rien à cloner ni
+  # déployer ici), et son propre réseau plutôt que `internal` — aucune route
+  # depuis le sidecar Tailscale, donc injoignable depuis le tailnet. Une
+  # compromission du daemon (qui, lui, vaut root sur l'hôte via le socket)
+  # ne donne jamais accès à ce token.
+  authkey-rotator:
+    image: dbox/daemon:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command:
+      - rotate-authkey
+      - --authkey-file
+      - "${DBOX_AUTHKEY:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/authkey}"
+      - --api-token-file
+      - "${DBOX_API_TOKEN:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/tailscale-api-token}"
+      - --orphans-report-file
+      - "${DBOX_ORPHANS_REPORT:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/orphans-report.json}"
+      - --tag-report-file
+      - "${DBOX_TAG_REPORT:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/tag-report.json}"
+      - --tailnet
+      - "${DBOX_TAILNET:?renseigner DBOX_TAILNET dans deploy/.env}"
+      - --ts-tag
+      - "${DBOX_TSTAG:-tag:dbox}"
+      - --interval
+      - "${DBOX_ROTATE_INTERVAL:-86400}"
+    user: "${DBOX_UID:-1000}:${DBOX_GID:-1000}"
+    volumes:
+      - ${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}:${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}
+    restart: unless-stopped
+    networks: [rotator]
+    # Le HEALTHCHECK de l'image interroge le port du daemon HTTP — rien
+    # n'écoute ici, ce service ne sert jamais de requête. Sans ça, Docker le
+    # marquerait « unhealthy » en continu pour une raison qui ne s'applique
+    # pas à lui.
+    healthcheck:
+      disable: true
+
+networks:
+  internal:
+    name: dbox-daemon_internal
+  # Délibérément séparé de `internal` : `authkey-rotator` n'a besoin de
+  # parler à rien d'autre dans ce projet, seulement à internet (l'API
+  # Tailscale) — pas de route depuis le sidecar, pas de route vers le daemon.
+  rotator:
+    name: dbox-daemon_rotator
+
+volumes:
+  ts-state: {}
