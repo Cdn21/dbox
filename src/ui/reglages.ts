@@ -12,6 +12,7 @@ import type { OrphansReport } from "../orphans-report.ts";
 import type { TagReport } from "../tag-report.ts";
 import { since } from "../registry.ts";
 import { machineSelector, PWA_HEAD, SCRIPT, STYLE, VENDOR_SCRIPTS } from "./chrome.ts";
+import type { Constat } from "../doctor.ts";
 import { escape } from "./html.ts";
 
 /**
@@ -50,6 +51,7 @@ export function renderSettingsPage(
   now: number = Date.now(),
   traefik: TraefikStatus | null = null,
   version: string | null = null,
+  diagnosticDisponible = false,
 ): string {
   return `<!doctype html>
 <html lang="fr">
@@ -74,6 +76,7 @@ ${etatMachine([
   traefikLigne(traefik),
   versionLigne(version),
 ])}
+${diagnosticDisponible ? diagnosticPanel() : ""}
 <div id="cle-machine">${sshKeyPanel(sshKey)}</div>
 ${machinesPanel(machines, canManageMachines)}
 ${VENDOR_SCRIPTS}
@@ -361,4 +364,42 @@ export function sshKeyPanel(sshKey: SshKeyStatus | null): string {
   <em>Deploy tokens</em> (GitLab) du dépôt que tu veux ajouter — un dépôt à la
   fois, jamais un accès à tout ton compte.</p>
 </div>`;
+}
+
+/**
+ * Le même diagnostic que `dbox doctor`, lancé à la demande : il interroge le
+ * réseau (MagicDNS, chaque app en HTTPS), quelques secondes que la page ne
+ * doit pas imposer à chaque ouverture. Lecture seule, comme la commande.
+ */
+function diagnosticPanel(): string {
+  return `<section class="cle-ssh diagnostic">
+  <div class="ligne"><span class="titre">Diagnostic</span>
+    <button type="button" hx-get="/api/diagnostic" hx-target="#resultat-diagnostic" hx-swap="innerHTML"
+      hx-disabled-elt="this" hx-indicator="#resultat-diagnostic">Lancer</button></div>
+  <p>Les prérequis de cette machine, vérifiés comme <code>dbox doctor</code> : Docker, clé Tailscale, réseau privé, HTTPS, tag ACL, disque. Rien n'est modifié.</p>
+  <div id="resultat-diagnostic" role="status" aria-live="polite"></div>
+</section>`;
+}
+
+const NIVEAUX: Record<Constat["niveau"], { symbole: string; classe: string; texte: string }> = {
+  ok: { symbole: "✔", classe: "marche", texte: "bon" },
+  attention: { symbole: "⚠", classe: "partielle", texte: "à surveiller" },
+  bloquant: { symbole: "✘", classe: "bloquant", texte: "bloquant" },
+  info: { symbole: "·", classe: "jamais", texte: "information" },
+};
+
+export function diagnosticFragment(constats: Constat[]): string {
+  const lignes = constats
+    .map((c) => {
+      const n = NIVEAUX[c.niveau];
+      const correction =
+        c.correction === undefined || c.niveau === "ok" ? "" : `<div class="correction">→ ${escape(c.correction)}</div>`;
+      return `<li class="constat"><span class="${n.classe}" title="${n.texte}" aria-label="${n.texte}">${n.symbole}</span>
+  <span><strong>${escape(c.sujet)}</strong> — ${escape(c.message)}${correction}</span></li>`;
+    })
+    .join("");
+  const b = constats.filter((c) => c.niveau === "bloquant").length;
+  const a = constats.filter((c) => c.niveau === "attention").length;
+  const bilan = b === 0 && a === 0 ? "tout est prêt" : [b > 0 ? `${b} bloquant${b > 1 ? "s" : ""}` : "", a > 0 ? `${a} à surveiller` : ""].filter(Boolean).join(", ");
+  return `<ul class="constats">${lignes}</ul><p class="bilan">${escape(bilan)}</p>`;
 }

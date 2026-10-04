@@ -56,8 +56,10 @@
 #                         dossier local. Choix propre à chaque machine, aucun
 #                         défaut qui ferait deviner où vivent tes projets.
 #   DBOX_API_TOKEN        token d'accès API Tailscale, pour le service
-#                         authkey-rotator ci-dessous — jamais lu par le
-#                         daemon, jamais monté dedans.
+#                         authkey-rotator ci-dessous (défaut :
+#                         $DBOX_HOME/secrets/tailscale-api-token). Vit sous
+#                         secrets/, que le daemon masque par un tmpfs vide : lu
+#                         par le rotator seul, jamais par le daemon.
 #   DBOX_ROTATE_INTERVAL  intervalle de vérification en secondes (défaut
 #                         86400, une fois par jour) — une régénération ne se
 #                         déclenche que si l'échéance approche vraiment.
@@ -98,6 +100,14 @@ services:
       - ${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/apps
       - --port
       - "${DBOX_PORT:-8099}"
+      # N'écoute que sur la boucle locale du namespace partagé avec le sidecar
+      # (network_mode plus bas) : seul `tailscale serve`, dans ce même
+      # namespace, l'atteint — donc seul le tailnet, via son ACL. Sans ça, un
+      # processus de l'hôte pouvait joindre l'IP du conteneur et forger
+      # l'en-tête d'identité que le proxy est censé être seul à poser (vérifié
+      # à la revue du 4 octobre 2026).
+      - --host
+      - "127.0.0.1"
       # Sans lui, le daemon fabriquerait des URL avec le gabarit non substitué.
       - --tailnet
       - "${DBOX_TAILNET:?renseigner DBOX_TAILNET dans deploy/.env}"
@@ -182,8 +192,23 @@ services:
       # n'est pas posé — redondant mais inoffensif : --workspaces-root reste
       # vide dans ce cas, la fonctionnalité reste éteinte malgré ce montage.
       - ${DBOX_WORKSPACES:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}}:${DBOX_WORKSPACES:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}}
+    # Partage la pile réseau du sidecar : le daemon est alors « localhost »
+    # pour `tailscale serve` (serve.json proxifie vers 127.0.0.1:8099), et il
+    # sort vers le tailnet par le sidecar pour ses contrôles de santé — vérifié
+    # que l'URL finale reste joignable depuis ce namespace. L'alternative (un
+    # réseau bridge partagé) exposait le port du daemon à tout l'hôte.
+    network_mode: "service:tailscale"
+    # Le tmpfs vide masque le dossier des secrets du rotator (le token d'API
+    # Tailscale) : il vit sous DBOX_HOME, que le daemon monte en entier, mais
+    # ce montage par-dessus le rend invisible et vide côté daemon. Le rotator,
+    # lui, ne pose pas ce tmpfs et lit le vrai fichier. Une compromission du
+    # daemon (root sur l'hôte via le socket) ne donne donc pas le token, qui
+    # vaut les pleins droits du compte Tailscale. Vérifié à la revue du
+    # 4 octobre 2026 : le token était lisible par le daemon avant ce masquage.
+    tmpfs:
+      - ${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/secrets
     restart: unless-stopped
-    networks: [internal]
+    depends_on: [tailscale]
 
   tailscale:
     image: tailscale/tailscale:stable
@@ -202,7 +227,6 @@ services:
       - ./serve.json:/config/serve.json:ro
     restart: unless-stopped
     networks: [internal]
-    depends_on: [daemon]
 
   # Le seul endroit qui connaît le token d'accès API Tailscale — jamais le
   # daemon, jamais le sidecar. Trois différences volontaires avec `daemon`,
@@ -226,7 +250,8 @@ services:
       - --authkey-file
       - "${DBOX_AUTHKEY:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/authkey}"
       - --api-token-file
-      - "${DBOX_API_TOKEN:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/tailscale-api-token}"
+      # Sous secrets/, que le tmpfs du daemon masque — voir le daemon plus haut.
+      - "${DBOX_API_TOKEN:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/secrets/tailscale-api-token}"
       - --orphans-report-file
       - "${DBOX_ORPHANS_REPORT:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/orphans-report.json}"
       - --tag-report-file

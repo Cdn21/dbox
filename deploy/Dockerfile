@@ -47,5 +47,10 @@ EXPOSE 8099
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD node -e "fetch('http://127.0.0.1:8099/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-ENTRYPOINT ["node", "src/cli.ts"]
+# Chemin ABSOLU : le lanceur (install.sh) se place dans le dossier courant
+# (-w "$PWD"), et un chemin relatif y désignait le src/cli.ts du PROJET quand il
+# en a un — très courant en TypeScript. Le code du projet s'exécutait alors à la
+# place de DBox, avec le socket Docker, c'est-à-dire root sur l'hôte. Prouvé le
+# 4 octobre 2026 avec un leurre ; gardé par test/version.test.ts.
+ENTRYPOINT ["node", "/app/src/cli.ts"]
 CMD ["serve"]

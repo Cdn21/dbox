@@ -67,7 +67,17 @@ fi
 # \`build\`. \$HOME lui-même n'est pas monté — seuls les sous-dossiers ci-dessous
 # le sont — donc \$HOME/.docker y serait un point de montage vide, possédé par
 # root : DOCKER_CONFIG le redirige vers un endroit réellement monté.
-exec docker run --rm -i \\
+# Un réseau nommé, pas le réseau par défaut : sur celui-ci, le conteneur hérite
+# du DNS amont de la box (systemd-resolved n'y est pas joignable) et les noms
+# *.ts.net ne se résolvent pas — le contrôle de santé de \`dbox up\` échouait
+# donc toujours, après 180 s, alors que l'app tournait. Sur un réseau nommé,
+# le DNS intégré de Docker relaie au résolveur de l'hôte, qui connaît le
+# tailnet. Créé au besoin, à chaque lancement : rien à installer à part.
+docker network inspect dbox-cli >/dev/null 2>&1 || docker network create dbox-cli >/dev/null
+# --pull never : une image absente ne doit jamais être cherchée sur un registre
+# (l'espace dbox de Docker Hub appartient à un tiers). install.sh l'a construite
+# ou téléchargée explicitement ; si elle manque, relancer install.sh.
+exec docker run --rm -i --pull never --network dbox-cli --hostname "\$(hostname)" \\
   --user "\$(id -u):\$(id -g)" \\
   --group-add "\$(getent group docker | cut -d: -f3)" \\
   -e HOME="\$HOME" \\

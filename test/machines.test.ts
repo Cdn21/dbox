@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { readMachines, writeMachines, type MachineEntry } from "../src/machines.ts";
+import { estUrlWeb, readMachines, writeMachines, type MachineEntry } from "../src/machines.ts";
 
 function harness(files: Record<string, string> = {}) {
   return {
@@ -46,6 +46,21 @@ describe("lecture des machines connues", () => {
     ]);
   });
 
+  it("écarte une entrée dont l'URL n'est pas http(s)", async () => {
+    // Le sélecteur fait location.href = url : une URL javascript: y exécuterait
+    // du code. Le fichier a pu être écrit hors de l'interface — filtré à la lecture.
+    const { read } = harness({
+      "/x/machines.json": JSON.stringify([
+        { name: "ok", url: "https://dbox.exemple.ts.net" },
+        { name: "piège", url: "javascript:alert(1)" },
+        { name: "aussi", url: "data:text/html,x" },
+      ]),
+    });
+    assert.deepEqual(await readMachines("/x/machines.json", read), [
+      { name: "ok", url: "https://dbox.exemple.ts.net" },
+    ]);
+  });
+
   it("lit une liste bien formée", async () => {
     const entries: MachineEntry[] = [
       { name: "serve (prod)", url: "https://dbox.mon-tailnet.ts.net" },
@@ -64,5 +79,17 @@ describe("écriture des machines connues", () => {
     await writeMachines("/x/machines.json", entries, write);
     assert.deepEqual(await readMachines("/x/machines.json", read), entries);
     assert.match(files["/x/machines.json"]!, /\n$/);
+  });
+});
+
+describe("validation de l'URL d'une machine", () => {
+  it("n'accepte que http(s)", () => {
+    assert.equal(estUrlWeb("https://dbox.exemple.ts.net"), true);
+    assert.equal(estUrlWeb("http://localhost:8099"), true);
+    assert.equal(estUrlWeb("javascript:alert(1)"), false);
+    assert.equal(estUrlWeb("data:text/html,x"), false);
+    assert.equal(estUrlWeb("file:///etc/passwd"), false);
+    assert.equal(estUrlWeb("pas une url"), false);
+    assert.equal(estUrlWeb(""), false);
   });
 });

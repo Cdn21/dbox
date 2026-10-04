@@ -5,7 +5,8 @@ import { Jobs } from "../src/jobs.ts";
 import { renderPage, renderSettingsPage } from "../src/ui/index.ts";
 import { ACTION_HEADER } from "../src/protocol.ts";
 import type { Entry } from "../src/registry.ts";
-import { route, viewerOf, type Actions, type Deps } from "../src/server.ts";
+import { createServer, route, viewerOf, type Actions, type Deps } from "../src/server.ts";
+import type { AddressInfo } from "node:net";
 import type { UpResult } from "../src/up.ts";
 
 const NOW = Date.parse("2026-08-10T07:00:00.000Z");
@@ -1649,11 +1650,14 @@ describe("machines connues", () => {
 
   function avecMachines(entries: { name: string; url: string }[], peutEnregistrer = true) {
     const harness = avecActions([entry()]);
+    const enregistrees: { name: string; url: string }[][] = [];
     harness.deps.machines = async () => entries;
     if (peutEnregistrer) {
-      harness.deps.actions!.saveMachines = async () => {};
+      harness.deps.actions!.saveMachines = async (e) => {
+        enregistrees.push(e);
+      };
     }
-    return harness;
+    return { ...harness, enregistrees };
   }
 
   it("404 par défaut : rien de configuré", async () => {
@@ -1693,6 +1697,20 @@ describe("machines connues", () => {
       form({ nom: "", url: "https://x" }),
     );
     assert.match(response.body, /nom et URL sont obligatoires/);
+  });
+
+  it("refuse une URL qui n'est pas http(s), sans rien enregistrer", async () => {
+    const harness = avecMachines([]);
+    const response = await route(
+      "POST",
+      "/api/machines",
+      AGIR,
+      harness.deps,
+      new URLSearchParams(),
+      form({ nom: "piège", url: "javascript:alert(1)" }),
+    );
+    assert.match(response.body, /n'est pas une adresse http\(s\)/);
+    assert.equal(harness.enregistrees.length, 0);
   });
 
   it("ignore en silence une ligne où les deux champs sont vides", async () => {
@@ -2235,6 +2253,36 @@ describe("un nom piégé n'atteint jamais une expression JavaScript", () => {
       const appels = executeLesClics(piege);
       assert.ok(appels.length > 0, "les boutons doivent quand même fonctionner");
       assert.ok(appels.every((a) => a.startsWith("bascule(")), `appels inattendus : ${appels.join(", ")}`);
+    });
+  }
+});
+
+describe("en-têtes de sécurité, sur toute réponse", () => {
+  // Posés par createServer, pas par route : un test de bout en bout, sur un
+  // vrai serveur. Garde contre le clickjacking (un site tiers encadre la page).
+  async function entetes(chemin: string, en: Record<string, string>): Promise<Headers> {
+    const serveur = createServer({ scan: async () => [], now: () => NOW });
+    await new Promise<void>((r) => serveur.listen(0, "127.0.0.1", r));
+    try {
+      const port = (serveur.address() as AddressInfo).port;
+      const reponse = await fetch(`http://127.0.0.1:${port}${chemin}`, { headers: en });
+      await reponse.text();
+      return reponse.headers;
+    } finally {
+      await new Promise<void>((r) => serveur.close(() => r()));
+    }
+  }
+
+  for (const [nom, chemin, en] of [
+    ["la page", "/", MOI],
+    ["/health sans identité", "/health", {}],
+    ["une réponse 401", "/", {}],
+  ] as const) {
+    it(`interdit le cadrage et le reniflage de type sur ${nom}`, async () => {
+      const h = await entetes(chemin, en);
+      assert.equal(h.get("x-frame-options"), "DENY");
+      assert.equal(h.get("content-security-policy"), "frame-ancestors 'none'");
+      assert.equal(h.get("x-content-type-options"), "nosniff");
     });
   }
 });

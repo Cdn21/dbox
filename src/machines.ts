@@ -19,6 +19,22 @@ export interface MachineEntry {
   url: string;
 }
 
+/**
+ * Seules les URL http(s) sont acceptées — à l'écriture comme à la lecture.
+ * Le sélecteur de machines navigue vers cette valeur (`location.href = url`) :
+ * une URL `javascript:` y exécuterait du code dans la page. Vérifié à la revue
+ * du 4 octobre 2026. Contrôlé aux deux bouts : l'interface pose la valeur, mais
+ * le fichier JSON peut aussi avoir été écrit autrement.
+ */
+export function estUrlWeb(url: string): boolean {
+  try {
+    const protocole = new URL(url).protocol;
+    return protocole === "http:" || protocole === "https:";
+  } catch {
+    return false;
+  }
+}
+
 /** Absent, vide ou illisible : liste vide, jamais une erreur — un sélecteur
  * qui ne propose que la machine courante reste un sélecteur valide. */
 export async function readMachines(
@@ -45,7 +61,8 @@ export async function readMachines(
       typeof entry === "object" &&
       entry !== null &&
       typeof (entry as Record<string, unknown>)["name"] === "string" &&
-      typeof (entry as Record<string, unknown>)["url"] === "string",
+      typeof (entry as Record<string, unknown>)["url"] === "string" &&
+      estUrlWeb((entry as Record<string, unknown>)["url"] as string),
   );
 }
 

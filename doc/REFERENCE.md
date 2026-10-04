@@ -294,6 +294,7 @@ dbox init          # écrit dbox.toml d'après le dossier et son Dockerfile
 dbox plan          # affiche les fichiers générés, sans rien toucher
 dbox up            # build + déploie       → https://budget.mon-tailnet.ts.net
 dbox rm <app>      # arrête et supprime une cible — source et volumes intacts
+dbox doctor        # vérifie les prérequis de la machine, sans rien modifier
 dbox ls            # ce qui tourne, où, depuis quand, avec quelle URL
 dbox serve         # le daemon : la même chose dans un navigateur
 dbox rotate-authkey # régénère authkey_file via l'API si l'échéance approche

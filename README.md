@@ -77,7 +77,7 @@ dbox setup        # writes ~/.config/dbox/config.toml for this machine
 The `dbox` command runs inside a container: Docker is the only thing you need
 on the host. To use the published image instead of building it, pick a
 [release](https://github.com/Cdn21/dbox/releases):
-`DBOX_IMAGE=ghcr.io/cdn21/dbox:1.1.0 ./install.sh` (amd64 and arm64). `dbox setup` asks five questions, in French:
+`DBOX_IMAGE=ghcr.io/cdn21/dbox:1.2.0 ./install.sh` (amd64 and arm64). `dbox setup` asks five questions, in French:
 
 | prompt | meaning | default |
 | --- | --- | --- |
@@ -94,7 +94,11 @@ that could log it. Put it there yourself:
 mkdir -p ~/dbox && echo 'tskey-auth-…' > ~/dbox/authkey && chmod 600 ~/dbox/authkey
 ```
 
-The file must contain the key and nothing else.
+The file must contain the key and nothing else. Then check everything at once:
+
+```bash
+dbox doctor       # Docker, auth key, tailnet, HTTPS, ACL tag, disk — changes nothing
+```
 
 ### 3. Deploy your first app
 
@@ -135,7 +139,7 @@ docker compose up -d daemon tailscale
 ```
 
 The daemon runs as UID 1000; set `DBOX_UID`/`DBOX_GID` in `.env` if yours
-differ. With a published image, add `DBOX_IMAGE=ghcr.io/cdn21/dbox:1.1.0` to
+differ. With a published image, add `DBOX_IMAGE=ghcr.io/cdn21/dbox:1.2.0` to
 `.env` and `docker pull` it first: DBox never pulls an image implicitly. Every other setting is documented at the top of
 `deploy/docker-compose.yml`.
 
@@ -162,6 +166,9 @@ an existing Traefik, and auto-deploy by polling (never a webhook) are described
 in [`doc/REFERENCE.md`](doc/REFERENCE.md).
 
 ## When something goes wrong
+
+Start with `dbox doctor` (or **Settings → Diagnostic** in the dashboard): it
+checks every prerequisite below and says how to fix what fails.
 
 - **The app never becomes reachable, or "invalid key".** Check that
   `~/dbox/authkey` contains only the key, and that `tag:dbox` exists in

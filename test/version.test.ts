@@ -20,6 +20,13 @@ describe("dbox --version", () => {
     assert.match(versionDuPaquet() ?? "", /^\d+\.\d+\.\d+$/);
   });
 
+  it("l'image démarre DBox par un chemin absolu, jamais le src/cli.ts du dossier courant", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const dockerfile = await readFile(new URL("../deploy/Dockerfile", import.meta.url), "utf8");
+    // Le lanceur fait -w "$PWD" : un chemin relatif exécutait le code du projet.
+    assert.match(dockerfile, /^ENTRYPOINT \["node", "\/app\/src\/cli\.ts"\]$/m);
+  });
+
   it("la commande répond sans charger de configuration", () => {
     const sortie = execFileSync(process.execPath, ["src/cli.ts", "--version"], {
       env: { ...process.env, DBOX_VERSION: "9.9.9", HOME: "/nonexistent" },

@@ -21,7 +21,7 @@ et se copient à la main si besoin.
 
 ```bash
 export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"   # node n'est PAS dans le PATH d'un shell non interactif
-node --test test/*.test.ts                          # 563 tests, ~600 ms
+node --test test/*.test.ts                          # 594 tests, ~700 ms
 npm run typecheck                                    # tsc --noEmit ; npm install d'abord si node_modules manque
 node src/cli.ts plan examples/budget --tailnet mon-tailnet.ts.net
 node src/cli.ts up <dossier> --target prod          # nécessite Docker + le tailnet
@@ -63,6 +63,9 @@ node src/cli.ts rm <app> --root ... [--target <cible>] [--yes]  # arrête et sup
 | `writer.ts` | matérialise un plan ; gère `preserveIfExists` |
 | `state.ts` | `state.json` : quelle version est déployée |
 | `tag.ts` | SHA git court, `-sale` si l'arbre est modifié |
+| `doctor.ts` | `dbox doctor` et le panneau Diagnostic : les prérequis de la machine ; **pur**, lecture seule, jamais le token d'API depuis le daemon |
+| `doctor-reel.ts` | les effets réels du diagnostic, bornés dans le temps |
+| `version.ts` | `dbox --version` : la version gravée dans l'image, sinon `package.json` |
 | `versions.ts` | lien vers le commit déployé, commits de la source non déployés ; **jamais de `fetch`** |
 | `docker.ts` | appels `docker compose` |
 | `health.ts` | attente active sur l'URL finale |
@@ -94,7 +97,7 @@ node src/cli.ts rm <app> --root ... [--target <cible>] [--yes]  # arrête et sup
 | `ui/reglages.ts` | `/settings` — presque tout en lecture seule |
 | `ui/page.ts` | la page d'accueil ; elle n'assemble que |
 | `vendor.ts` | htmx et Alpine vendorisés (`src/vendor/`), servis par le daemon lui-même |
-| `cli.ts` | `setup`, `init`, `plan`, `up`, `ls`, `add` et `serve` |
+| `cli.ts` | `setup`, `doctor`, `init`, `plan`, `up`, `ls`, `add`, `rm`, `serve`, `rotate-authkey` |
 
 ## Invariants — un test garde chacun, ne pas les casser
 

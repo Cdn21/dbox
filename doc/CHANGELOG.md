@@ -6,6 +6,47 @@ All notable changes to DBox. The format follows
 `deploy/` setup that works with one version keeps working with every later
 version of the same major.
 
+## [1.2.0] — 2026-10-04
+
+### Added
+
+- **`dbox doctor`** checks this machine's prerequisites and says how to fix
+  what fails: Docker, the auth key (present, nothing else in the file, `600`,
+  not expired), being on the tailnet, apps answering over HTTPS (and whether
+  tailnet names resolve at all), the ACL tag in `tagOwners`, the root folder,
+  free disk space. It changes nothing. The dashboard runs the same checks from
+  **Settings → Diagnostic**, without ever reading the Tailscale API token.
+
+### Security
+
+- The image now starts DBox through an absolute path. The `dbox` launcher runs
+  in the current folder, and the relative entrypoint of earlier images made it
+  run the **project's own** `src/cli.ts` when there was one — with access to
+  the Docker socket. **Every image up to 1.1.0 is affected: rerun
+  `install.sh`.**
+- The launcher never pulls an image implicitly (`--pull never`).
+- The dashboard daemon now shares its Tailscale sidecar's network namespace and
+  binds to `127.0.0.1`: it is reachable only through the sidecar, and thus only
+  through the tailnet's ACL. Before, a process on the host could reach the
+  container directly and forge the identity header the proxy is meant to add.
+- The Tailscale API token is now hidden from the daemon (an empty `tmpfs` over
+  `secrets/`), so it is read only by the isolated `authkey-rotator`. Before, the
+  daemon mounted the whole data directory and could read the token — which holds
+  full account rights. **On upgrade, move the token to
+  `$DBOX_HOME/secrets/tailscale-api-token`.**
+- Every HTTP response sends `X-Frame-Options: DENY`,
+  `Content-Security-Policy: frame-ancestors 'none'` and `X-Content-Type-Options:
+  nosniff` (anti-clickjacking).
+- A "known machine" URL must be `http(s)`: a `javascript:` URL could otherwise
+  run code when selected in the machine switcher.
+
+### Fixed
+
+- `dbox up` run through the launcher always failed its health check after
+  180 s: the container could not resolve tailnet names. The launcher now runs
+  on a named Docker network, whose DNS reaches the host's resolver. Rerun
+  `install.sh` to get it.
+
 ## [1.1.0] — 2026-10-04
 
 ### Added
@@ -72,5 +113,6 @@ First public version: `dbox.toml`, the three modes (`deployed`, `devcontainer`,
 with rollback, the dashboard, `dbox add` from git, SSH deploy keys, Tailscale
 auth key rotation, stale node and ACL tag reports.
 
+[1.2.0]: https://github.com/Cdn21/dbox/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Cdn21/dbox/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Cdn21/dbox/releases/tag/v1.0.0

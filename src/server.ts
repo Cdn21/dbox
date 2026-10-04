@@ -26,6 +26,7 @@ import { createServer as createHttpServer, type IncomingMessage, type ServerResp
 import type { Compose, RunResult } from "./docker.ts";
 import { track, type Jobs } from "./jobs.ts";
 import type { VersionInfo } from "./versions.ts";
+import type { Constat } from "./doctor.ts";
 import {
   apercuManifeste,
   applyEnv,
@@ -46,6 +47,7 @@ import { validateEntries, type EnvEntry } from "./env.ts";
 import {
   actionResult,
   apercuFragment,
+  diagnosticFragment,
   cleAppFragment,
   envPanelFragment,
   escape,
@@ -71,7 +73,7 @@ import type { AuthkeyNotice } from "./authkey.ts";
 import type { OrphansReport } from "./orphans-report.ts";
 import type { TagReport } from "./tag-report.ts";
 import type { Entry } from "./registry.ts";
-import type { MachineEntry } from "./machines.ts";
+import { estUrlWeb, type MachineEntry } from "./machines.ts";
 import type { UpResult } from "./up.ts";
 
 export { ACTION_HEADER, IDENTITY_HEADERS };
@@ -144,6 +146,9 @@ export interface Deps {
   /** Lien vers le commit déployé et retard de la source (`versions.ts`) —
    * absent, les cartes montrent le SHA nu, comme avant. */
   versionInfo?: (source: string, tag: string) => Promise<VersionInfo>;
+  /** Le diagnostic de `dbox doctor`, vu depuis le daemon — lecture seule, et
+   * sans jamais le token d'API (voir doctor.ts). Absent : pas de panneau. */
+  diagnostic?: () => Promise<Constat[]>;
 }
 
 type Headers = Record<string, string | string[] | undefined>;
@@ -232,8 +237,13 @@ export async function route(
           deps.now(),
           deps.traefik ?? null,
           deps.version ?? null,
+          deps.diagnostic !== undefined,
         ),
       );
+    }
+    if (path === "/api/diagnostic") {
+      if (deps.diagnostic === undefined) return text(404, "diagnostic non disponible sur ce daemon\n");
+      return html(diagnosticFragment(await deps.diagnostic()));
     }
     if (path === "/api/machines") {
       return json({ entries: deps.machines === undefined ? [] : await deps.machines() });
@@ -650,6 +660,13 @@ async function saveMachinesRoute(body: string, actions: Actions): Promise<Respon
   }
   const entries: MachineEntry[] = paires.filter((p) => p.name !== "" && p.url !== "");
 
+  // Le sélecteur fait `location.href = url` : une URL non http(s) y exécuterait
+  // du code (javascript:…) chez quiconque choisit l'entrée. Refusé à l'écriture.
+  const mauvaise = entries.find((e) => !estUrlWeb(e.url));
+  if (mauvaise !== undefined) {
+    return html(actionResult(false, `« ${mauvaise.url} » n'est pas une adresse http(s)`, false));
+  }
+
   await actions.saveMachines(entries);
   return html(actionResult(true, "enregistré", false));
 }
@@ -762,6 +779,19 @@ function readBody(request: IncomingMessage): Promise<string> {
   });
 }
 
+/**
+ * Posés sur **toute** réponse, au seul point de sortie réel : le tableau de
+ * bord ne doit jamais s'afficher dans un cadre (clickjacking — un site tiers
+ * encadre la page et fait cliquer une action à l'insu de la personne, vérifié
+ * à la revue du 4 octobre 2026), ni voir son type deviné. `route` reste pur et
+ * ignore le transport ; ces en-têtes ne peuvent pas être oubliés sur un chemin.
+ */
+export const ENTETES_SECURITE: Record<string, string> = {
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+};
+
 export function createServer(deps: Deps) {
   return createHttpServer((request: IncomingMessage, response: ServerResponse) => {
     const url = new URL(request.url ?? "/", "http://dbox");
@@ -770,7 +800,7 @@ export function createServer(deps: Deps) {
         route(request.method ?? "GET", url.pathname, request.headers, deps, url.searchParams, body),
       )
       .then((result) => {
-        response.writeHead(result.status, result.headers);
+        response.writeHead(result.status, { ...ENTETES_SECURITE, ...result.headers });
         response.end(request.method === "HEAD" ? undefined : result.body);
       })
       .catch((error: Error) => {

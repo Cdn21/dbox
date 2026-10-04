@@ -304,6 +304,12 @@ pre { margin:.65rem 0 0; padding:.6rem; border:1px solid var(--bord); border-rad
   background:var(--carte); border:1px solid var(--bord); border-radius:8px; padding:.6rem .7rem;
   word-break:break-all; }
 .cle-ssh p { margin:.5rem 0 0; color:var(--doux); font-size:.85rem; }
+.constats { gap:.35rem; margin-top:.6rem; }
+.constat { display:flex; gap:.55rem; align-items:baseline; font-size:.86rem; border:0; background:none; padding:0; }
+.constat::before { display:none; }
+.constat .bloquant { color:#d41833; }
+.constat .correction { color:var(--doux); font-size:.8rem; margin-top:.1rem; overflow-wrap:anywhere; }
+.diagnostic .bilan { margin-top:.5rem; font-weight:600; color:var(--texte); }
 `;
 
 /**

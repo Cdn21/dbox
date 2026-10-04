@@ -77,6 +77,16 @@ echo 'COLLE-TA-CLE-ICI' > ~/dbox/authkey
 côté — un espace ou un texte en trop dans ce fichier, et la clé est refusée
 sans message clair.
 
+Puis vérifie tout d'un coup, sans rien modifier :
+
+```bash
+dbox doctor
+```
+
+Il contrôle Docker, la clé, la présence sur le tailnet, le HTTPS, le tag ACL et
+le disque, et dit quoi faire pour chaque point qui coince. Le tableau de bord
+propose le même diagnostic dans **Réglages → Diagnostic**.
+
 ## 3. Déployer ta première app
 
 Il te faut un dossier avec un `Dockerfile` — DBox ne le devine jamais, c'est
@@ -109,6 +119,8 @@ vaut la lire en conscience plutôt que la lancer en réflexe. Marche à
 suivre : `deploy/docker-compose.yml` dans le dépôt.
 
 ## En cas de blocage
+
+Commence par `dbox doctor` : il vérifie chacun des points ci-dessous.
 
 **« invalid key » ou l'app ne devient jamais joignable**
 Vérifie `~/dbox/authkey` : rien d'autre que la clé, aucun texte du modèle

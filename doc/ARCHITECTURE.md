@@ -77,6 +77,7 @@ dans les couches basses, jamais l'inverse.
 | `yaml.ts` | Émission YAML, citation conservatrice (invariant 5). |
 | `plan.ts` | `Manifest` + cible + `Context` → `Plan` : la liste exacte des fichiers à écrire, dont `dbox.json`. |
 | `preflight.ts` | Ce qui va casser, dit **avant** de construire. N'empêche jamais rien. |
+| `doctor.ts` | Les prérequis de la machine (`dbox doctor`, panneau Diagnostic) : effets injectés, lecture seule. Le daemon ne lui donne jamais le token d'API. |
 | `init.ts` | Déduit nom, port et volume d'un dossier et de son `Dockerfile`. |
 | `env.ts` | Format `.env` : `CLÉ=valeur`, rien d'autre. |
 | `ui/*` | Rendu HTML côté serveur. `ui/html.ts` porte l'échappement (invariant 8). |
@@ -116,7 +117,7 @@ tests.
 
 | Module | Rôle |
 | --- | --- |
-| `cli.ts` | `setup`, `init`, `plan`, `up`, `ls`, `add`, `rm`, `serve`, `rotate-authkey`. Assemble les dépendances réelles et les injecte. |
+| `cli.ts` | `setup`, `doctor`, `init`, `plan`, `up`, `ls`, `add`, `rm`, `serve`, `rotate-authkey`. Assemble les dépendances réelles et les injecte. |
 | `server.ts` | Daemon HTTP. `route()` est **pur** (méthode, chemin, en-têtes, `Deps` → `Response`) ; `createServer()` n'est qu'une glu mince autour. |
 | `ui/index.ts` | Seule porte d'entrée de l'interface pour `server.ts`. |
 

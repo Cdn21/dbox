@@ -22,4 +22,4 @@ export {
   redeployerMaintenant,
   type JobView,
 } from "./panneaux.ts";
-export { renderSettingsPage, sshKeyPanel, type SshKeyStatus, type TraefikStatus } from "./reglages.ts";
+export { diagnosticFragment, renderSettingsPage, sshKeyPanel, type SshKeyStatus, type TraefikStatus } from "./reglages.ts";

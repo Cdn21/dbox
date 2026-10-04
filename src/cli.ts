@@ -11,9 +11,12 @@ import { configPath, loadConfig, serializeConfig, type Config } from "./config.t
 import { draft, renderManifest } from "./init.ts";
 import { checkUpstream, clone, isGitRepo, nameFromUrl, pull } from "./sources.ts";
 import { DEFAULT_CONTEXT, type Context, type TraefikConfig } from "./compose.ts";
+import { hostname } from "node:os";
 import { composeRunner, run } from "./docker.ts";
 import { avecCache, versionInfo } from "./versions.ts";
 import { versionAffichee, versionDuPaquet } from "./version.ts";
+import { aDesBloquants, diagnostic, formaterTexte } from "./doctor.ts";
+import { effetsReels } from "./doctor-reel.ts";
 import { httpProbe } from "./health.ts";
 import { ManifestError, parseManifest, type Manifest } from "./manifest.ts";
 import { planFor, type Plan } from "./plan.ts";
@@ -42,6 +45,7 @@ const USAGE = `dbox <setup|add|init|plan|up|rm|ls|serve|rotate-authkey> [dossier
 
   --version         la version de cette copie de DBox
   setup             configure cette machine une fois pour toutes (interactif)
+  doctor            vérifie les prérequis de cette machine, sans rien modifier
   add <url>         clone un dépôt, écrit son manifeste au besoin, et déploie
   init              écrit un dbox.toml à partir du dossier et de son Dockerfile
   plan              affiche les fichiers générés, sans rien toucher
@@ -147,7 +151,7 @@ async function main(argv: string[]): Promise<number> {
     process.stdout.write(`dbox ${versionAffichee(process.env["DBOX_VERSION"], versionDuPaquet())}\n`);
     return 0;
   }
-  if (!["setup", "add", "init", "plan", "up", "rm", "ls", "serve", "rotate-authkey"].includes(command)) {
+  if (!["setup", "doctor", "add", "init", "plan", "up", "rm", "ls", "serve", "rotate-authkey"].includes(command)) {
     process.stderr.write(`commande inconnue « ${command} »\n\n${USAGE}`);
     return 1;
   }
@@ -157,6 +161,10 @@ async function main(argv: string[]): Promise<number> {
 
   const config = await loadConfig(configPath());
   const options = parseArgs(argv.slice(1), config);
+
+  // Avant tout refus : le diagnostic doit tourner justement quand la
+  // configuration est incomplète, c'est lui qui le dit.
+  if (command === "doctor") return await runDoctor(options);
 
   if (command === "init") return await runInit(resolve(options.directory));
 
@@ -464,6 +472,39 @@ async function runInit(directory: string): Promise<number> {
   return 0;
 }
 
+async function runDoctor(options: Options): Promise<number> {
+  const configPresente = await readFile(configPath(), "utf8").then(
+    () => true,
+    () => false,
+  );
+  const tailnet = options.tailnet.includes("<") ? undefined : options.tailnet;
+  // La CLI, lancée par la personne, peut lire le token d'API pour vérifier le
+  // tag en direct quand le rapport du rotator manque. Le daemon, jamais.
+  const tokenFile = options.apiTokenFile;
+  const tagOwners =
+    tokenFile === undefined || tailnet === undefined
+      ? undefined
+      : async () => {
+          const token = (await readFile(tokenFile, "utf8").catch(() => "")).trim();
+          return token === "" ? null : await listTagOwners(tailnet, token);
+        };
+  const tagFile = options.tagReportFile;
+
+  process.stdout.write(`dbox doctor — ${hostname()}\n\n`);
+  const constats = await diagnostic({
+    ...effetsReels(options.root),
+    tailnet,
+    tsTag: options.tsTag,
+    root: options.root,
+    authkeyFile: options.authkeyFile,
+    configPresente,
+    tagReport: tagFile === undefined ? async () => null : () => readTagReport(tagFile, (p) => readFile(p, "utf8")),
+    tagOwners,
+  });
+  process.stdout.write(formaterTexte(constats));
+  return aDesBloquants(constats) ? 1 : 0;
+}
+
 async function runLs(options: Options): Promise<number> {
   const entries = await scan(options.root, async () => (await run("docker", PS_ARGS)).stdout);
 
@@ -746,6 +787,21 @@ function runServe(options: Options): Promise<number> {
     // Jamais de fetch (voir versions.ts), et une minute de cache : la liste se
     // rend toutes les 15 s, par chaque onglet ouvert.
     versionInfo: avecCache((source, tag) => versionInfo(source, tag, (args) => run("git", args))),
+    // Le même diagnostic que `dbox doctor`, sans token d'API : le tag se lit
+    // dans le rapport du rotator, jamais en direct depuis le daemon.
+    diagnostic: () =>
+      diagnostic({
+        ...effetsReels(options.root),
+        tailnet: options.tailnet.includes("<") ? undefined : options.tailnet,
+        tsTag: options.tsTag,
+        root: options.root,
+        authkeyFile: options.authkeyFile,
+        configPresente: null,
+        tagReport:
+          options.tagReportFile === undefined
+            ? async () => null
+            : () => readTagReport(options.tagReportFile!, (p) => readFile(p, "utf8")),
+      }),
     appSshKeyStatus,
     machines: machinesList,
     workspacesRoot,
