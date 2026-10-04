@@ -152,6 +152,35 @@ describe("accès", () => {
     assert.equal(scanned, false);
   });
 
+  it("sans liste d'autorisation, toute identité du tailnet passe", async () => {
+    const r = await route("GET", "/api/apps/list", { "tailscale-user-login": "quelconque@ailleurs" }, lecture([]));
+    assert.equal(r.status, 200);
+  });
+
+  it("avec une liste, une identité hors liste reçoit 403, même en lecture", async () => {
+    const deps: Deps = { ...lecture([entry()]), allowedUsers: ["proprio@github"] };
+    const intrus = await route("GET", "/api/apps/budget/prod/env", { "tailscale-user-login": "intrus@ailleurs" }, deps);
+    assert.equal(intrus.status, 403);
+    // /env ne renvoie donc aucune valeur à un non-autorisé.
+    assert.doesNotMatch(intrus.body, /value=/);
+  });
+
+  it("avec une liste, le propriétaire passe (casse ignorée)", async () => {
+    const deps: Deps = { ...lecture([entry()]), allowedUsers: ["proprio@github"] };
+    const r = await route("GET", "/api/apps/list", { "tailscale-user-login": "Proprio@GitHub" }, deps);
+    assert.equal(r.status, 200);
+  });
+
+  it("une liste vide ne restreint rien", async () => {
+    const deps: Deps = { ...lecture([]), allowedUsers: [] };
+    assert.equal((await route("GET", "/api/apps/list", { "tailscale-user-login": "x@y" }, deps)).status, 200);
+  });
+
+  it("la liste ne bloque jamais /health", async () => {
+    const deps: Deps = { ...lecture([]), allowedUsers: ["proprio@github"] };
+    assert.equal((await route("GET", "/health", {}, deps)).status, 200);
+  });
+
   it("exige l'en-tête maison sur toute écriture", async () => {
     // Sans lui, un formulaire d'un site tiers déclencherait un déploiement :
     // l'identité est injectée par le proxy, donc présente sur une requête croisée.
@@ -2281,8 +2310,11 @@ describe("en-têtes de sécurité, sur toute réponse", () => {
     it(`interdit le cadrage et le reniflage de type sur ${nom}`, async () => {
       const h = await entetes(chemin, en);
       assert.equal(h.get("x-frame-options"), "DENY");
-      assert.equal(h.get("content-security-policy"), "frame-ancestors 'none'");
+      assert.match(h.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+      assert.match(h.get("content-security-policy") ?? "", /object-src 'none'/);
       assert.equal(h.get("x-content-type-options"), "nosniff");
+      assert.equal(h.get("strict-transport-security"), "max-age=31536000");
+      assert.equal(h.get("referrer-policy"), "no-referrer");
     });
   }
 });

@@ -139,7 +139,10 @@ docker compose up -d daemon tailscale
 ```
 
 The daemon runs as UID 1000; set `DBOX_UID`/`DBOX_GID` in `.env` if yours
-differ. With a published image, add `DBOX_IMAGE=ghcr.io/cdn21/dbox:1.2.0` to
+differ. By default any identity your tailnet lets reach the node has full
+access; set `DBOX_ALLOWED_USERS` (comma-separated Tailscale logins) in `.env`
+to restrict the dashboard to yourself — recommended, as a second barrier behind
+the tailnet ACL. With a published image, add `DBOX_IMAGE=ghcr.io/cdn21/dbox:1.2.0` to
 `.env` and `docker pull` it first: DBox never pulls an image implicitly. Every other setting is documented at the top of
 `deploy/docker-compose.yml`.
 

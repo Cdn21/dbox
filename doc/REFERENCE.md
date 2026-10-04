@@ -542,7 +542,14 @@ demande confirmation ; une cible de dev, non. Les journaux se filtrent (sur le
 serveur, pour survivre au suivi en direct), et le formulaire d'ajout montre le
 `dbox.toml` qu'il écrira avant qu'on clique.
 
-Deux gardes encadrent l'accès :
+Trois gardes encadrent l'accès :
+
+- **La liste d'autorisation** (`--allowed-users`, `DBOX_ALLOWED_USERS`), quand
+  elle est posée : seules les identités Tailscale listées passent, les autres
+  reçoivent 403, lectures comprises. Sans elle (défaut), toute identité du
+  tailnet passe et l'ACL du tailnet est la seule frontière — à poser pour
+  qu'un appareil invité ou compromis du tailnet ne lise pas l'`env` d'une app
+  ni ne pilote quoi que ce soit.
 
 - **L'identité.** Elle vient des en-têtes que `tailscale serve` ajoute aux
   requêtes proxifiées. Sans elle, rien n'est servi — le seul chemin d'accès est

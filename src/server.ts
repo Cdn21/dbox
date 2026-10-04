@@ -149,6 +149,12 @@ export interface Deps {
   /** Le diagnostic de `dbox doctor`, vu depuis le daemon — lecture seule, et
    * sans jamais le token d'API (voir doctor.ts). Absent : pas de panneau. */
   diagnostic?: () => Promise<Constat[]>;
+  /** Les identités Tailscale autorisées (login en minuscules). Absente ou vide :
+   * toute identité du tailnet passe, comme avant — l'ACL du tailnet reste la
+   * seule frontière. Posée : les autres identités reçoivent 403, même en
+   * lecture. C'est elle qui ferme l'accès aux secrets (`/env`) et au reste à
+   * tout appareil du tailnet qui n'est pas le propriétaire. */
+  allowedUsers?: string[];
 }
 
 type Headers = Record<string, string | string[] | undefined>;
@@ -184,6 +190,15 @@ export async function route(
   const viewer = viewerOf(headers);
   if (viewer === null) {
     return text(401, "identité Tailscale absente — passer par le sidecar\n");
+  }
+  // Au-delà de « une identité » : **laquelle**. Sans cette liste, n'importe quel
+  // appareil du tailnet lisait les secrets d'une app (/env renvoie les valeurs)
+  // et pilotait tout — l'ACL Tailscale était la seule défense. Relevé par le
+  // recon du 4 octobre 2026. Comparaison en minuscules, sur le login comme sur
+  // le nom (viewerOf préfère le login). Vide = comportement d'avant, assumé.
+  if (deps.allowedUsers !== undefined && deps.allowedUsers.length > 0
+      && !deps.allowedUsers.includes(viewer.toLowerCase())) {
+    return text(403, "identité non autorisée sur ce DBox\n");
   }
 
   const segments = path.split("/").filter((segment) => segment !== "");
@@ -788,8 +803,15 @@ function readBody(request: IncomingMessage): Promise<string> {
  */
 export const ENTETES_SECURITE: Record<string, string> = {
   "x-frame-options": "DENY",
-  "content-security-policy": "frame-ancestors 'none'",
+  // frame-ancestors : pas de cadrage. object-src/base-uri : verrous bon marché.
+  // Pas de `default-src 'self'` : Alpine évalue ses expressions (Function),
+  // ce qui demanderait `unsafe-eval`, et toute la page est en inline — le gain
+  // d'un verrou qu'il faut rouvrir en grand serait illusoire.
+  "content-security-policy": "frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
   "x-content-type-options": "nosniff",
+  // TLS toujours fourni par le sidecar Tailscale ; HSTS l'inscrit côté client.
+  "strict-transport-security": "max-age=31536000",
+  "referrer-policy": "no-referrer",
 };
 
 export function createServer(deps: Deps) {

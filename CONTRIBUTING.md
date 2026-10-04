@@ -21,7 +21,7 @@ et se copient à la main si besoin.
 
 ```bash
 export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"   # node n'est PAS dans le PATH d'un shell non interactif
-node --test test/*.test.ts                          # 594 tests, ~700 ms
+node --test test/*.test.ts                          # 599 tests, ~700 ms
 npm run typecheck                                    # tsc --noEmit ; npm install d'abord si node_modules manque
 node src/cli.ts plan examples/budget --tailnet mon-tailnet.ts.net
 node src/cli.ts up <dossier> --target prod          # nécessite Docker + le tailnet

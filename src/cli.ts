@@ -69,6 +69,8 @@ const USAGE = `dbox <setup|add|init|plan|up|rm|ls|serve|rotate-authkey> [dossier
   --port <n>        (serve) port d'écoute (défaut 8099)
   --host <adresse>  (serve) interface d'écoute (défaut 0.0.0.0)
   --poll-interval <s>  (serve) sondage des cibles auto_deploy (défaut 300 ; 0 = désactivé)
+  --allowed-users <csv> (serve) identités Tailscale autorisées (ex. moi@github) ;
+                    vide = toute identité du tailnet passe (ACL Tailscale seule)
   --authkey-file <f> clé d'auth semée dans chaque nouvelle cible
   --admin-authkey-file <f> (serve) marqueur d'échéance de la clé du daemon (défaut : à côté de --authkey-file)
   --api-token-file <f> (rotate-authkey) token d'accès API Tailscale (défaut : à côté de --authkey-file)
@@ -134,6 +136,9 @@ interface Options {
   workspacesRoot?: string;
   /** Cible par défaut de la machine, lue dans la configuration. */
   defaultTarget?: string;
+  /** (serve) identités Tailscale autorisées. Vide : toute identité du tailnet
+   * passe (l'ACL Tailscale reste la seule frontière). */
+  allowedUsers?: string[];
   sources: string;
   name?: string;
   pull: boolean;
@@ -784,6 +789,7 @@ function runServe(options: Options): Promise<number> {
     version: process.env["DBOX_VERSION"],
     sshKeyStatus,
     listWorkspaces: workspacesList,
+    allowedUsers: options.allowedUsers,
     // Jamais de fetch (voir versions.ts), et une minute de cache : la liste se
     // rend toutes les 15 s, par chaque onglet ouvert.
     versionInfo: avecCache((source, tag) => versionInfo(source, tag, (args) => run("git", args))),
@@ -1075,6 +1081,16 @@ function parseArgs(args: string[], config: Config = {}): Options {
         // 0 est valide : c'est la façon d'éteindre le sondage.
         if (!Number.isFinite(seconds) || seconds < 0) throw new Error("--poll-interval attend des secondes");
         options.pollIntervalMs = seconds * 1000;
+        break;
+      }
+      case "--allowed-users": {
+        // CSV plutôt qu'option répétée : plus simple à poser depuis une seule
+        // variable d'environnement dans deploy/docker-compose.yml. Minuscules
+        // pour une comparaison insensible à la casse, vide ignoré.
+        options.allowedUsers = expect(args, ++i, arg)
+          .split(",")
+          .map((u) => u.trim().toLowerCase())
+          .filter((u) => u !== "");
         break;
       }
       default:

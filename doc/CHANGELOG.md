@@ -6,6 +6,27 @@ All notable changes to DBox. The format follows
 `deploy/` setup that works with one version keeps working with every later
 version of the same major.
 
+## [1.3.0] — 2026-10-04
+
+### Added
+
+- **Owner allowlist.** `--allowed-users` (env `DBOX_ALLOWED_USERS`, a
+  comma-separated list of Tailscale logins) restricts the dashboard to those
+  identities; everyone else gets `403`, reads included. Empty (the default)
+  keeps the previous behaviour, where any tailnet identity is accepted and the
+  tailnet ACL is the only boundary. Set it so that a guest or compromised device
+  on your tailnet cannot read an app's environment or control your apps.
+
+### Security
+
+- A black-box recon confirmed that, without the allowlist above, any tailnet
+  device could read every app's environment values in clear through
+  `GET /api/apps/<app>/<target>/env` and stop or deploy apps. The allowlist is
+  the defence-in-depth answer; the tailnet ACL remains the first barrier.
+- Added `Strict-Transport-Security`, `Referrer-Policy: no-referrer`, and
+  `object-src 'none'; base-uri 'self'` to the content security policy on every
+  response.
+
 ## [1.2.0] — 2026-10-04
 
 ### Added
@@ -113,6 +134,7 @@ First public version: `dbox.toml`, the three modes (`deployed`, `devcontainer`,
 with rollback, the dashboard, `dbox add` from git, SSH deploy keys, Tailscale
 auth key rotation, stale node and ACL tag reports.
 
+[1.3.0]: https://github.com/Cdn21/dbox/releases/tag/v1.3.0
 [1.2.0]: https://github.com/Cdn21/dbox/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Cdn21/dbox/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Cdn21/dbox/releases/tag/v1.0.0

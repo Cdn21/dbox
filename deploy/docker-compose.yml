@@ -33,6 +33,11 @@
 #                         uniquement par son sidecar Tailscale ci-dessous.
 #   DBOX_POLL_INTERVAL    sondage des cibles auto_deploy, en secondes (défaut
 #                         300 ; 0 désactive le sondage entièrement)
+#   DBOX_ALLOWED_USERS    identités Tailscale autorisées (login, ex. moi@github),
+#                         séparées par des virgules. Vide (défaut) : toute
+#                         identité du tailnet passe. Posée : les autres reçoivent
+#                         403, même en lecture — défense en profondeur par-dessus
+#                         l'ACL Tailscale.
 #   DBOX_SSH      dossier .ssh monté pour cloner des dépôts privés (défaut ~/.ssh)
 #   DBOX_AUTHKEY  fichier de clé Tailscale semé dans chaque nouvelle cible
 #   DBOX_ADMIN_AUTHKEY    marqueur d'échéance de la clé du daemon lui-même
@@ -160,6 +165,14 @@ services:
       - "${DBOX_WORKSPACES:-}"
       - --poll-interval
       - "${DBOX_POLL_INTERVAL:-300}"
+      # Identités Tailscale autorisées (login, ex. moi@github), séparées par des
+      # virgules. Vide : toute identité du tailnet passe, comme avant. Posée :
+      # seules ces identités accèdent — c'est ce qui ferme l'accès aux secrets
+      # (/env) et au pilotage à un appareil du tailnet qui n'est pas le
+      # propriétaire. L'ACL Tailscale reste la première barrière ; ceci est la
+      # défense en profondeur par-dessus.
+      - --allowed-users
+      - "${DBOX_ALLOWED_USERS:-}"
     # Pas root : l'image node:24-bookworm-slim définit déjà un utilisateur
     # « node » en 1000:1000, qui se trouve être l'identité de l'utilisateur
     # « serve » sur l'hôte. Sans ça, chaque fichier écrit par le daemon — un
