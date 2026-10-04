@@ -6,6 +6,13 @@ All notable changes to DBox. The format follows
 `deploy/` setup that works with one version keeps working with every later
 version of the same major.
 
+## [1.3.1] — 2026-10-04
+
+### Changed
+
+- Vendored libraries refreshed to htmx 2.0.11 and Alpine.js 3.17.4 (housekeeping;
+  no known vulnerability in the previous 2.0.10 / 3.16.1).
+
 ## [1.3.0] — 2026-10-04
 
 ### Added
@@ -134,6 +141,7 @@ First public version: `dbox.toml`, the three modes (`deployed`, `devcontainer`,
 with rollback, the dashboard, `dbox add` from git, SSH deploy keys, Tailscale
 auth key rotation, stale node and ACL tag reports.
 
+[1.3.1]: https://github.com/Cdn21/dbox/releases/tag/v1.3.1
 [1.3.0]: https://github.com/Cdn21/dbox/releases/tag/v1.3.0
 [1.2.0]: https://github.com/Cdn21/dbox/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Cdn21/dbox/releases/tag/v1.1.0
