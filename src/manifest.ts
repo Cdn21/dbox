@@ -38,6 +38,52 @@ interface Forwardable {
   sshPort: number | null;
 }
 
+/**
+ * Domaine public par lequel cette cible est **aussi** joignable, en plus de son
+ * sidecar privé — additif, jamais à sa place : le sidecar continue de tourner,
+ * ce qui garde un accès par le tailnet même si la route publique casse.
+ * `null` : cible strictement privée, le comportement par défaut.
+ *
+ * Jamais hérité d'un défaut de machine, contrairement à `ts_tag` : une cible
+ * n'est publique que si son propre `dbox.toml` le dit. Un réglage machine qui
+ * rendrait des cibles publiques sans le vouloir serait le pire genre de bug.
+ *
+ * Absent du mode `workspace` : sans conteneur d'app, il n'y a rien sur quoi
+ * poser les labels que Traefik découvre, et son provider Docker ne sait pas
+ * router vers un processus qui tourne sur l'hôte.
+ */
+interface Published {
+  publicDomain: string | null;
+}
+
+/**
+ * Un service compagnon : une base, un cache, une file — ce dont l'app a besoin
+ * à côté d'elle. L'app le joint par son nom sur le réseau interne (`db:5432`).
+ *
+ * Volontairement pauvre : une image toute faite et, au plus, un volume nommé.
+ * Pas de commande, pas de build, pas de ports, pas de montage de l'hôte —
+ * c'est cette impossibilité d'exprimer un chemin hôte qui préserve
+ * l'invariant 7 (aucune app ne peut réclamer le socket Docker). Au-delà, la
+ * réponse est d'écrire son propre compose : DBox est jetable, c'est prévu.
+ */
+export interface CompanionService {
+  image: string;
+  /** Chemin dans le conteneur, monté sur un volume nommé. `null` : sans état. */
+  data: string | null;
+}
+
+/**
+ * Les compagnons de cette cible, par nom. Objet vide quand il n'y en a pas —
+ * jamais `null`, pour éviter un cas de plus à traiter partout.
+ *
+ * Absent du mode `workspace` : sans conteneur d'app, un compagnon sur le réseau
+ * interne serait injoignable depuis le processus qui tourne sur l'hôte, et
+ * publier un port pour l'atteindre est exclu (invariant 1).
+ */
+interface Companioned {
+  services: Record<string, CompanionService>;
+}
+
 export interface WorkspaceTarget extends Checked, Tagged, Forwardable {
   mode: "workspace";
   port: number;
@@ -53,7 +99,7 @@ interface Pollable {
   autoDeploy: boolean;
 }
 
-export interface DevcontainerTarget extends Checked, Pollable, Tagged, Forwardable {
+export interface DevcontainerTarget extends Checked, Pollable, Tagged, Forwardable, Published, Companioned {
   mode: "devcontainer";
   port: number;
   command: string;
@@ -66,7 +112,7 @@ export interface DevcontainerTarget extends Checked, Pollable, Tagged, Forwardab
   dockerfile: string | null;
   data: string | null;
 }
-export interface DeployedTarget extends Checked, Pollable, Tagged, Forwardable {
+export interface DeployedTarget extends Checked, Pollable, Tagged, Forwardable, Published, Companioned {
   mode: "deployed";
   port: number;
   dockerfile: string;
@@ -93,10 +139,23 @@ export class ManifestError extends Error {
 
 /** Un label DNS : c'est un nom de machine sur le tailnet, pas un nom de projet. */
 const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/** Un nom d'app ou de cible valide — exporté pour le registre, qui relit des
+ * `dbox.json` venus du disque et ne doit pas croire ce qu'ils annoncent. */
+export function isLabel(name: string): boolean {
+  return LABEL.test(name);
+}
 const MAX_LABEL = 63;
 
 /** Un tag Tailscale : « tag: » suivi d'un label, comme `tag:dbox`. */
 const TS_TAG = /^tag:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/**
+ * Un domaine public : des labels DNS séparés par des points. Volontairement
+ * simple — DBox ne valide pas contre la liste réelle des TLD, il attrape les
+ * fautes de frappe évidentes (une URL entière, un chemin, un nom sans point).
+ */
+const DOMAIN = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
 
 /** La cible « prod » porte le nom nu ; les autres sont suffixées. */
 export function hostnameFor(name: string, target: string): string {
@@ -117,9 +176,32 @@ const KEYS_BY_MODE: Record<Mode, readonly string[]> = {
     "auto_deploy",
     "ts_tag",
     "ssh_port",
+    "public_domain",
+    "services",
   ],
-  deployed: ["mode", "port", "dockerfile", "health", "data", "auto_deploy", "ts_tag", "ssh_port"],
+  deployed: [
+    "mode",
+    "port",
+    "dockerfile",
+    "health",
+    "data",
+    "auto_deploy",
+    "ts_tag",
+    "ssh_port",
+    "public_domain",
+    "services",
+  ],
 };
+
+/**
+ * Noms qu'un compagnon ne peut pas porter : ils entreraient en collision avec
+ * les services que DBox génère lui-même, et le compose produit serait
+ * silencieusement faux plutôt que refusé.
+ */
+const SERVICES_RESERVES: readonly string[] = ["app", "tailscale", "caddy"];
+
+/** Les seules clés qu'un compagnon accepte — voir `CompanionService`. */
+const CLES_COMPAGNON: readonly string[] = ["image", "data"];
 
 const DEFAULT_DEV_IMAGE = "node:24-bookworm-slim";
 const DEFAULT_DOCKERFILE = "Dockerfile";
@@ -205,6 +287,19 @@ export function serializeManifest(manifest: Manifest): string {
     if (target.health !== DEFAULT_HEALTH) lines.push(`health = ${str(target.health)}`);
     if (target.tsTag !== null) lines.push(`ts_tag = ${str(target.tsTag)}`);
     if (target.sshPort !== null) lines.push(`ssh_port = ${target.sshPort}`);
+    if (target.mode !== "workspace" && target.publicDomain !== null) {
+      lines.push(`public_domain = ${str(target.publicDomain)}`);
+    }
+
+    // Les sous-tables viennent **après** toutes les clés scalaires de la cible :
+    // en TOML, ce qui suit un `[a.b.c]` lui appartient, donc un scalaire écrit
+    // ici finirait dans le compagnon au lieu de la cible.
+    if (target.mode !== "workspace") {
+      for (const [nom, service] of Object.entries(target.services)) {
+        lines.push("", `[targets.${name}.services.${nom}]`, `image = ${str(service.image)}`);
+        if (service.data !== null) lines.push(`data = ${str(service.data)}`);
+      }
+    }
 
     lines.push("");
   }
@@ -233,6 +328,89 @@ function validateName(name: string, fail: (path: string, message: string) => nev
     fail("name", `« ${name} » fait ${name.length} caractères, maximum ${MAX_LABEL}`);
   }
   fail("name", `« ${name} » n'est pas un nom de machine valide (minuscules, chiffres, tirets)${hint}`);
+}
+
+/**
+ * Les compagnons d'une cible. Absent = aucun, pas une erreur.
+ *
+ * Chaque clé inconnue explose plutôt que de disparaître (invariant 15) : un
+ * `command` ou un `ports` écrit ici serait ignoré en silence sinon, et
+ * l'utilisateur chercherait longtemps pourquoi son compose n'en tient pas
+ * compte.
+ */
+/**
+ * Un chemin de volume dans le conteneur. Absolu, et **sans deux-points** : la
+ * valeur est concaténée en `volume:chemin` pour Compose, où un `:` de plus est
+ * lu comme des options de montage. Écrire « /data:ro » donnerait donc un
+ * montage en lecture seule au lieu du chemin demandé — un sens changé en
+ * silence, ce que ce parseur ne fait jamais.
+ */
+function parseDataPath(
+  raw: unknown,
+  path: string,
+  fail: (path: string, message: string) => never,
+): string | null {
+  if (raw === undefined) return null;
+  if (typeof raw !== "string" || !raw.startsWith("/")) {
+    fail(path, `« data » doit être un chemin absolu dans le conteneur (reçu « ${String(raw)} »)`);
+  }
+  if ((raw as string).includes(":")) {
+    fail(
+      path,
+      `« data » ne peut pas contenir « : » (reçu « ${String(raw)} ») — Docker y lirait des options ` +
+        `de montage, et « /data:ro » deviendrait un montage en lecture seule`,
+    );
+  }
+  return raw as string;
+}
+
+function parseServices(
+  raw: unknown,
+  path: string,
+  fail: (path: string, message: string) => never,
+): Record<string, CompanionService> {
+  if (raw === undefined) return {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    fail(`${path}.services`, `« services » doit être une table ([${path}.services.nom])`);
+  }
+
+  const services: Record<string, CompanionService> = {};
+
+  for (const [nom, brut] of Object.entries(raw as TomlTable)) {
+    const chemin = `${path}.services.${nom}`;
+
+    // Le nom sert d'hôte sur le réseau interne : c'est ainsi que l'app le joint.
+    if (!LABEL.test(nom)) {
+      fail(chemin, `« ${nom} » n'est pas un nom de service valide (minuscules, chiffres, tirets)`);
+    }
+    if (SERVICES_RESERVES.includes(nom)) {
+      fail(chemin, `« ${nom} » est réservé — DBox génère déjà un service de ce nom`);
+    }
+    if (typeof brut !== "object" || brut === null || Array.isArray(brut)) {
+      fail(chemin, `« ${chemin} » doit être une table`);
+    }
+
+    for (const cle of Object.keys(brut as TomlTable)) {
+      if (CLES_COMPAGNON.includes(cle)) continue;
+      fail(
+        `${chemin}.${cle}`,
+        `clé « ${cle} » inattendue dans un service — seuls ${CLES_COMPAGNON.join(" et ")} sont acceptés ` +
+          `(un compagnon est une image toute faite ; pour davantage, écris ton propre compose)`,
+      );
+    }
+
+    const image = (brut as TomlTable)["image"];
+    if (image === undefined) fail(chemin, `« ${chemin}.image » est obligatoire`);
+    if (typeof image !== "string" || image === "") {
+      fail(`${chemin}.image`, "« image » doit être une chaîne non vide");
+    }
+
+    const data = parseDataPath((brut as TomlTable)["data"], `${chemin}.data`, fail);
+
+    services[nom] = { image: image as string, data };
+  }
+
+  return services;
 }
 
 function parseTarget(
@@ -265,14 +443,7 @@ function parseTarget(
     fail(`${path}.health`, `« health » doit être un chemin commençant par « / » (reçu « ${String(health)} »)`);
   }
 
-  const rawData = raw["data"];
-  let data: string | null = null;
-  if (rawData !== undefined) {
-    if (typeof rawData !== "string" || !rawData.startsWith("/")) {
-      fail(`${path}.data`, `« data » doit être un chemin absolu dans le conteneur (reçu « ${String(rawData)} »)`);
-    }
-    data = rawData as string;
-  }
+  const data = parseDataPath(raw["data"], `${path}.data`, fail);
 
   const autoDeploy = raw["auto_deploy"] ?? false;
   if (typeof autoDeploy !== "boolean") {
@@ -301,6 +472,21 @@ function parseTarget(
     tsTag = rawTsTag;
   }
 
+  const rawPublicDomain = raw["public_domain"];
+  let publicDomain: string | null = null;
+  if (rawPublicDomain !== undefined) {
+    if (typeof rawPublicDomain !== "string" || !DOMAIN.test(rawPublicDomain)) {
+      fail(
+        `${path}.public_domain`,
+        `« public_domain » doit être un nom de domaine, sans schéma ni chemin ` +
+          `(reçu « ${String(rawPublicDomain)} »)`,
+      );
+    }
+    publicDomain = rawPublicDomain;
+  }
+
+  const services = parseServices(raw["services"], path, fail);
+
   if (mode === "deployed") {
     const dockerfile = raw["dockerfile"] ?? DEFAULT_DOCKERFILE;
     if (typeof dockerfile !== "string" || dockerfile === "") {
@@ -315,6 +501,8 @@ function parseTarget(
       autoDeploy: autoDeploy as boolean,
       tsTag,
       sshPort,
+      publicDomain,
+      services,
     };
   }
 
@@ -356,6 +544,8 @@ function parseTarget(
     autoDeploy: autoDeploy as boolean,
     tsTag,
     sshPort,
+    publicDomain,
+    services,
   };
 }
 

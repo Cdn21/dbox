@@ -10,8 +10,8 @@
     "noUncheckedIndexedAccess": true,
     "forceConsistentCasingInFileNames": true,
     // Interdit tout ce que Node effacerait mal (enum, propriétés de
-    // constructeur, décorateurs…) — même règle que celle documentée à la main
-    // pour quiconque contribue au projet.
+    // constructeur, décorateurs…) — le compilateur applique la même règle
+    // que CONTRIBUTING.md documente déjà à la main.
     "erasableSyntaxOnly": true,
     "skipLibCheck": true,
     "types": ["node"]

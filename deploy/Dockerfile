@@ -27,6 +27,15 @@ WORKDIR /app
 COPY src/ ./src/
 COPY package.json ./
 
+# Gravée ici parce qu'elle ne peut pas être déduite à l'exécution : le
+# conteneur n'a pas de dépôt git (ni même, sur une machine déployée, un
+# `tool/` qui en soit un — ce sont des fichiers copiés). Déclarée **après**
+# les couches coûteuses : changer de version ne réinstalle pas apt.
+# Défaut « inconnue » : une image construite à la main reste valide, elle le
+# dit simplement.
+ARG DBOX_VERSION=inconnue
+ENV DBOX_VERSION=$DBOX_VERSION
+
 # Le daemon tourne en root : il doit pouvoir écrire les fichiers générés et
 # parler au socket Docker, dont le groupe varie d'un hôte à l'autre. C'est
 # assumé — cette image vaut de toute façon root sur la machine, c'est pourquoi

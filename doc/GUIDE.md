@@ -6,7 +6,7 @@ utiliser quoi, et comment s'en servir au quotidien.
 
 - Pour l'installation pas à pas, réseau privé Tailscale compris : **[`INSTALL.md`](INSTALL.md)**.
 - Pour comprendre *comment* DBox pense — modèle, invariants, arbitrages,
-  ce qui se génère exactement : **[`README.md`](README.md)**.
+  ce qui se génère exactement : **[`REFERENCE.md`](REFERENCE.md)**.
 
 Ce document-ci ne répète pas ce que les deux autres couvrent déjà ; il relie
 les choses entre elles et donne des scénarios concrets.
@@ -124,7 +124,7 @@ Tes sources sont montées dans un conteneur (pas copiées), la commande y
 tourne, le rechargement reste instantané. Utile dès que le projet mêle
 deux runtimes, ou quand tu veux la parité avec la prod sans polluer ton
 poste. Piège classique : installer une dépendance se fait *dans* le
-conteneur, jamais sur l'hôte — voir « Pièges connus » du `README.md`.
+conteneur, jamais sur l'hôte — voir « Pièges connus » de `REFERENCE.md`.
 
 ---
 
@@ -161,7 +161,7 @@ port = 5173
 `dbox up ~/mon-projet --target dev` → `https://mon-projet-dev.tontailnet.ts.net`,
 rechargement instantané à chaque sauvegarde. Vite en particulier demande
 deux réglages (`server.allowedHosts`, `server.hmr`) — détaillés dans les
-« Pièges connus » du `README.md`.
+« Pièges connus » de `REFERENCE.md`.
 
 ### 3. Une app qui se redéploie toute seule à chaque push
 
@@ -260,7 +260,7 @@ pas de registre partagé, pas de source de vérité centrale.
 
 ## Aller plus loin
 
-- **`README.md`** — le modèle complet, le manifeste en détail, les
+- **`REFERENCE.md`** — le modèle complet, le manifeste en détail, les
   invariants de sécurité, ce que génère exactement DBox, et les pièges
   connus (HMR, UID, dépendances natives).
 - **`INSTALL.md`** — configurer Tailscale depuis zéro, dépanner un

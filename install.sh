@@ -18,7 +18,9 @@
 set -eu
 
 REPO_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-IMAGE=dbox/daemon:local
+# DBOX_IMAGE : une image publiée (ex. ghcr.io/cdn21/dbox:1.1.0), téléchargée au
+# lieu d'être construite. Absente : construite ici, sous un nom local.
+IMAGE=${DBOX_IMAGE:-dbox-daemon:local}
 BIN_DIR="$HOME/.local/bin"
 
 echo "DBox — installation sur $(hostname)"
@@ -37,8 +39,13 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "→ construction de l'image ($IMAGE)…"
-docker build -q -f "$REPO_DIR/deploy/Dockerfile" -t "$IMAGE" "$REPO_DIR" >/dev/null
+if [ -n "${DBOX_IMAGE:-}" ]; then
+  echo "→ téléchargement de l'image ($IMAGE)…"
+  docker pull -q "$IMAGE" >/dev/null
+else
+  echo "→ construction de l'image ($IMAGE)…"
+  docker build -q -f "$REPO_DIR/deploy/Dockerfile" -t "$IMAGE" "$REPO_DIR" >/dev/null
+fi
 
 mkdir -p "$BIN_DIR"
 cat > "$BIN_DIR/dbox" <<LAUNCHER

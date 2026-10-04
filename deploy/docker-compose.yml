@@ -21,6 +21,16 @@
 #   DBOX_HOME     racine des données DBox sur l'hôte, obligatoire
 #   DBOX_PORT     port interne du daemon (défaut 8099)
 #   DBOX_TSTAG    tag ACL des apps redéployées (défaut tag:dbox)
+#   DBOX_TRAEFIK_NETWORK / DBOX_TRAEFIK_CERT_RESOLVER   mode public : réseau
+#                         Docker externe du Traefik déjà en service sur cette
+#                         machine, et son resolver ACME. Les deux ensemble ou
+#                         aucun ; sans eux, une cible qui pose public_domain est
+#                         refusée. DBox ne configure jamais ce Traefik : il pose
+#                         seulement des labels sur ses propres conteneurs.
+#                         Aucun montage supplémentaire — c'est un nom de réseau,
+#                         résolu par le vrai dockerd de l'hôte au `up` de chaque
+#                         cible. Ne concerne jamais le daemon lui-même, exposé
+#                         uniquement par son sidecar Tailscale ci-dessous.
 #   DBOX_POLL_INTERVAL    sondage des cibles auto_deploy, en secondes (défaut
 #                         300 ; 0 désactive le sondage entièrement)
 #   DBOX_SSH      dossier .ssh monté pour cloner des dépôts privés (défaut ~/.ssh)
@@ -62,10 +72,21 @@ name: dbox-daemon
 
 services:
   daemon:
-    image: dbox/daemon:local
+    # Construite ici par défaut (dbox-daemon:local, un nom sans espace de noms,
+    # que personne d'autre que Docker ne peut publier sur Docker Hub).
+    # DBOX_IMAGE choisit une image publiée à la place, par exemple
+    # ghcr.io/cdn21/dbox:1.1.0 — à télécharger soi-même d'abord
+    # (`docker pull`, ou install.sh) : pull_policy: never fait aussi sauter
+    # `docker compose pull`. Jamais de téléchargement implicite : sur Docker
+    # Hub, l'espace `dbox` appartient à un tiers.
+    image: ${DBOX_IMAGE:-dbox-daemon:local}
+    pull_policy: never
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+      args:
+        # Affichée sur /settings — voir ARG DBOX_VERSION dans le Dockerfile.
+        DBOX_VERSION: "${DBOX_VERSION:-inconnue}"
     # Node en PID 1 ne récupère pas les petits-enfants orphelins (un
     # sous-processus qui forkerait un enfant lui survivant) — protection à
     # coût nul contre une accumulation de zombies, même si les sous-processus
@@ -83,6 +104,12 @@ services:
       # Le tag des apps qu'il redéploie — pas le sien, qui est dbox-admin.
       - --ts-tag
       - "${DBOX_TSTAG:-tag:dbox}"
+      # Chaînes vides par défaut : sans les deux posées, toute cible qui
+      # demanderait public_domain est refusée, exactement comme en CLI.
+      - --traefik-network
+      - "${DBOX_TRAEFIK_NETWORK:-}"
+      - --traefik-cert-resolver
+      - "${DBOX_TRAEFIK_CERT_RESOLVER:-}"
       # Sans lui, « ajouter une app » cloneraient dans /opt/dbox : le conteneur
       # n'a pas accès à ~/.config/dbox/config.toml pour connaître le vrai
       # dossier de sources, contrairement à la CLI lancée sur l'hôte.
@@ -186,10 +213,14 @@ services:
   # compromission du daemon (qui, lui, vaut root sur l'hôte via le socket)
   # ne donne jamais accès à ce token.
   authkey-rotator:
-    image: dbox/daemon:local
+    image: ${DBOX_IMAGE:-dbox-daemon:local}
+    pull_policy: never   # même raison que pour le daemon
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+      args:
+        # Affichée sur /settings — voir ARG DBOX_VERSION dans le Dockerfile.
+        DBOX_VERSION: "${DBOX_VERSION:-inconnue}"
     command:
       - rotate-authkey
       - --authkey-file

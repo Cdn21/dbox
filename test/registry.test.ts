@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Descriptor } from "../src/plan.ts";
-import { parseContainers, PS_FORMAT, scan, since, statusOf } from "../src/registry.ts";
+import { listDescriptors, parseContainers, PS_FORMAT, scan, since, statusOf } from "../src/registry.ts";
 
 const PS = [
   "dbox-budget-prod|dbox-budget-prod-app-1|running",
@@ -49,40 +49,42 @@ describe("état d'une cible", () => {
   });
 });
 
+async function fixture(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "dbox-registry-"));
+
+  const budget: Descriptor = {
+    app: "budget",
+    target: "prod",
+    mode: "deployed",
+    hostname: "budget",
+    url: "https://budget.mon-tailnet.ts.net",
+    healthUrl: "https://budget.mon-tailnet.ts.net/api/session",
+    project: "dbox-budget-prod",
+    source: "/home/serve/dbox/budget",
+    autoDeploy: false,
+    publicDomain: null,
+    services: [],
+  };
+  await mkdir(join(root, "budget", "prod"), { recursive: true });
+  await writeFile(join(root, "budget", "prod", "dbox.json"), JSON.stringify(budget));
+  await writeFile(
+    join(root, "budget", "prod", "state.json"),
+    JSON.stringify({ tag: "abc123", previousTag: null, deployedAt: "2026-08-09T20:00:00.000Z" }),
+  );
+
+  await mkdir(join(root, "temoin", "prod"), { recursive: true });
+  await writeFile(
+    join(root, "temoin", "prod", "dbox.json"),
+    JSON.stringify({ ...budget, app: "temoin", hostname: "temoin", project: "dbox-temoin-prod" }),
+  );
+
+  // Un dossier qui n'est pas une cible DBox : ignoré, sans erreur.
+  await mkdir(join(root, "autre-chose", "bidule"), { recursive: true });
+
+  return root;
+}
+
 describe("balayage du disque", () => {
-  async function fixture(): Promise<string> {
-    const root = await mkdtemp(join(tmpdir(), "dbox-registry-"));
-
-    const budget: Descriptor = {
-      app: "budget",
-      target: "prod",
-      mode: "deployed",
-      hostname: "budget",
-      url: "https://budget.mon-tailnet.ts.net",
-      healthUrl: "https://budget.mon-tailnet.ts.net/api/session",
-      project: "dbox-budget-prod",
-      source: "/home/serve/dbox/budget",
-      autoDeploy: false,
-    };
-    await mkdir(join(root, "budget", "prod"), { recursive: true });
-    await writeFile(join(root, "budget", "prod", "dbox.json"), JSON.stringify(budget));
-    await writeFile(
-      join(root, "budget", "prod", "state.json"),
-      JSON.stringify({ tag: "abc123", previousTag: null, deployedAt: "2026-08-09T20:00:00.000Z" }),
-    );
-
-    await mkdir(join(root, "temoin", "prod"), { recursive: true });
-    await writeFile(
-      join(root, "temoin", "prod", "dbox.json"),
-      JSON.stringify({ ...budget, app: "temoin", hostname: "temoin", project: "dbox-temoin-prod" }),
-    );
-
-    // Un dossier qui n'est pas une cible DBox : ignoré, sans erreur.
-    await mkdir(join(root, "autre-chose", "bidule"), { recursive: true });
-
-    return root;
-  }
-
   it("inventorie les cibles et y attache l'état réel", async () => {
     const entries = await scan(await fixture(), async () => PS);
 
@@ -108,6 +110,64 @@ describe("balayage du disque", () => {
   });
 });
 
+describe("descripteurs seuls, sans Docker", () => {
+  it("lit toutes les cibles, sans avoir besoin de docker ps", async () => {
+    const descriptors = await listDescriptors(await fixture());
+    assert.deepEqual(
+      descriptors.map((d) => d.app).sort(),
+      ["budget", "temoin"],
+    );
+  });
+
+  it("ignore un dossier sans dbox.json, comme le balayage complet", async () => {
+    const descriptors = await listDescriptors(await fixture());
+    assert.equal(
+      descriptors.some((d) => d.app === "autre-chose"),
+      false,
+    );
+  });
+
+  it("rend une liste vide sur une racine inexistante", async () => {
+    assert.deepEqual(await listDescriptors("/n/existe/pas"), []);
+  });
+});
+
+describe("dbox.json écrit par une version antérieure", () => {
+  async function ancien(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), "dbox-ancien-"));
+    await mkdir(join(root, "vieille", "prod"), { recursive: true });
+    // Ni `services` ni `publicDomain` : le format d'avant. Quatre apps réelles
+    // étaient dans ce cas au moment d'écrire ce test.
+    await writeFile(
+      join(root, "vieille", "prod", "dbox.json"),
+      JSON.stringify({
+        app: "vieille",
+        target: "prod",
+        mode: "deployed",
+        hostname: "vieille",
+        url: "https://vieille.t.net",
+        healthUrl: "https://vieille.t.net/",
+        project: "dbox-vieille-prod",
+        source: "/s",
+        autoDeploy: false,
+      }),
+    );
+    return root;
+  }
+
+  it("complète les champs absents plutôt que de mentir sur le type", async () => {
+    const [entry] = await scan(await ancien(), async () => "");
+    assert.deepEqual(entry!.descriptor.services, []);
+    assert.equal(entry!.descriptor.publicDomain, null);
+  });
+
+  it("les complète aussi pour listDescriptors, que up interroge", async () => {
+    const [descriptor] = await listDescriptors(await ancien());
+    assert.deepEqual(descriptor!.services, []);
+    assert.equal(descriptor!.publicDomain, null);
+  });
+});
+
 describe("ancienneté", () => {
   const now = Date.parse("2026-08-09T21:00:00.000Z");
 
@@ -120,5 +180,40 @@ describe("ancienneté", () => {
 
   it("ne casse pas sur une date illisible", () => {
     assert.equal(since("", now), "—");
+  });
+});
+
+describe("le registre ne croit pas ce qu'annonce un dbox.json", () => {
+  async function racineAvec(app: string, target: string, descriptor: Record<string, unknown>): Promise<string> {
+    const { mkdtemp, mkdir, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const racine = await mkdtemp(`${tmpdir()}/dbox-registre-`);
+    await mkdir(`${racine}/${app}/${target}`, { recursive: true });
+    await writeFile(`${racine}/${app}/${target}/dbox.json`, JSON.stringify(descriptor));
+    return racine;
+  }
+  const base = { mode: "deployed", hostname: "x", url: "https://x", healthUrl: "https://x/", project: "dbox-x-prod", source: "/s", autoDeploy: false };
+
+  it("garde une entrée cohérente avec son dossier", async () => {
+    const racine = await racineAvec("budget", "prod", { ...base, app: "budget", target: "prod" });
+    assert.equal((await scan(racine, async () => "")).length, 1);
+    assert.equal((await listDescriptors(racine)).length, 1);
+  });
+
+  it("écarte un nom qui n'est pas un label DNS : DBox ne l'aurait jamais écrit", async () => {
+    const piege = "x')-alert(1)-('";
+    const racine = await racineAvec("x", "prod", { ...base, app: piege, target: "prod" });
+    assert.deepEqual(await scan(racine, async () => ""), []);
+    assert.deepEqual(await listDescriptors(racine), []);
+  });
+
+  it("écarte une entrée dont le nom ne correspond pas à son dossier", async () => {
+    const racine = await racineAvec("budget", "prod", { ...base, app: "autre", target: "prod" });
+    assert.deepEqual(await scan(racine, async () => ""), []);
+  });
+
+  it("écarte un dossier au nom invalide, même si dbox.json le recopie", async () => {
+    const racine = await racineAvec("Budget", "prod", { ...base, app: "Budget", target: "prod" });
+    assert.deepEqual(await scan(racine, async () => ""), []);
   });
 });

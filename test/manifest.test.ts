@@ -48,6 +48,8 @@ describe("manifeste valide", () => {
       autoDeploy: false,
       tsTag: null,
       sshPort: null,
+      publicDomain: null,
+      services: {},
     });
   });
 
@@ -67,6 +69,8 @@ describe("manifeste valide", () => {
       autoDeploy: false,
       tsTag: null,
       sshPort: null,
+      publicDomain: null,
+      services: {},
     });
   });
 });
@@ -133,6 +137,7 @@ describe("sérialisation", () => {
     assert.doesNotMatch(toml, /dockerfile/);
     assert.doesNotMatch(toml, /ts_tag/);
     assert.doesNotMatch(toml, /ssh_port/);
+    assert.doesNotMatch(toml, /public_domain/);
   });
 
   it("échappe ce qui casserait une chaîne TOML", () => {
@@ -255,6 +260,156 @@ describe("forward SSH par cible", () => {
     const manifest = parseManifest(`name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\nssh_port = 22\n`);
     const toml = serializeManifest(manifest);
     assert.match(toml, /ssh_port = 22/);
+    assert.deepEqual(parseManifest(toml), manifest);
+  });
+});
+
+describe("services compagnons", () => {
+  const AVEC_DB = `
+name = "budget"
+
+[targets.prod]
+mode = "deployed"
+port = 8080
+
+[targets.prod.services.db]
+image = "postgres:16-alpine"
+data = "/var/lib/postgresql/data"
+`;
+
+  const compagnons = (source: string) => {
+    const cible = parseManifest(source).targets["prod"]!;
+    return cible.mode === "workspace" ? {} : cible.services;
+  };
+
+  it("absents par défaut : un objet vide, jamais null", () => {
+    assert.deepEqual(compagnons(VALID), {});
+  });
+
+  it("lit image et data", () => {
+    assert.deepEqual(compagnons(AVEC_DB), {
+      db: { image: "postgres:16-alpine", data: "/var/lib/postgresql/data" },
+    });
+  });
+
+  it("data est optionnel : un cache n'a rien à garder", () => {
+    const s = compagnons(`name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\n[targets.prod.services.cache]\nimage = "redis:7-alpine"\n`);
+    assert.deepEqual(s, { cache: { image: "redis:7-alpine", data: null } });
+  });
+
+  it("marche aussi en devcontainer", () => {
+    const m = parseManifest(`name = "a"\n[targets.dev]\nmode = "devcontainer"\ncommand = "x"\nport = 80\n[targets.dev.services.db]\nimage = "postgres:16"\n`);
+    const cible = m.targets["dev"]!;
+    assert.deepEqual(Object.keys(cible.mode === "workspace" ? {} : cible.services), ["db"]);
+  });
+
+  it("refusés en workspace : injoignables depuis un processus de l'hôte", () => {
+    refuses(
+      `name = "a"\n[targets.dev]\nmode = "workspace"\ncommand = "x"\nport = 80\n[targets.dev.services.db]\nimage = "postgres:16"\n`,
+      "clé « services » inattendue en mode workspace",
+    );
+  });
+
+  it("exige une image — il n'y a rien à deviner", () => {
+    refuses(
+      `name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\n[targets.prod.services.db]\ndata = "/data"\n`,
+      "est obligatoire",
+    );
+  });
+
+  it("refuse un nom qui entrerait en collision avec un service généré", () => {
+    for (const nom of ["app", "tailscale", "caddy"]) {
+      refuses(
+        `name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\n[targets.prod.services.${nom}]\nimage = "x"\n`,
+        "est réservé",
+      );
+    }
+  });
+
+  it("refuse un nom qui ne serait pas joignable comme hôte", () => {
+    refuses(
+      `name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\n[targets.prod.services.MaBase]\nimage = "x"\n`,
+      "n'est pas un nom de service valide",
+    );
+  });
+
+  it("refuse une clé inconnue plutôt que de l'ignorer", () => {
+    // Sans ça, un `command` ou un `ports` écrit ici disparaîtrait en silence.
+    refuses(
+      `name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\n[targets.prod.services.db]\nimage = "x"\ncommand = "postgres"\n`,
+      "clé « command » inattendue dans un service",
+    );
+  });
+
+  it("refuse un « : » dans data, comme pour l'app", () => {
+    refuses(
+      `name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\n[targets.prod.services.db]\nimage = "x"\ndata = "/data:ro"\n`,
+      "ne peut pas contenir",
+    );
+  });
+
+  it("refuse un data relatif, comme pour l'app", () => {
+    refuses(
+      `name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\n[targets.prod.services.db]\nimage = "x"\ndata = "donnees"\n`,
+      "chemin absolu dans le conteneur",
+    );
+  });
+
+  it("fait l'aller-retour à la sérialisation, avec deux compagnons", () => {
+    const manifest = parseManifest(
+      `${AVEC_DB}\n[targets.prod.services.cache]\nimage = "redis:7-alpine"\n`,
+    );
+    const toml = serializeManifest(manifest);
+    assert.match(toml, /\[targets\.prod\.services\.db\]/);
+    assert.match(toml, /\[targets\.prod\.services\.cache\]/);
+    assert.deepEqual(parseManifest(toml), manifest);
+  });
+
+  it("n'écrit rien quand il n'y en a pas", () => {
+    assert.doesNotMatch(serializeManifest(parseManifest(VALID)), /services/);
+  });
+});
+
+describe("domaine public par cible", () => {
+  it("absent du manifeste par défaut", () => {
+    const manifest = parseManifest(VALID);
+    const prod = manifest.targets["prod"]!;
+    assert.equal(prod.mode === "deployed" ? prod.publicDomain : "absent", null);
+  });
+
+  it("lit un domaine valide, en deployed et en devcontainer", () => {
+    for (const source of [
+      `name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\npublic_domain = "budget.exemple.fr"\n`,
+      `name = "a"\n[targets.dev]\nmode = "devcontainer"\ncommand = "x"\nport = 80\npublic_domain = "budget.exemple.fr"\n`,
+    ]) {
+      const manifest = parseManifest(source);
+      const target = manifest.targets[Object.keys(manifest.targets)[0]!]!;
+      assert.equal(target.mode === "workspace" ? null : target.publicDomain, "budget.exemple.fr");
+    }
+  });
+
+  it("refuse public_domain en mode workspace : rien à router sans conteneur", () => {
+    refuses(
+      `name = "a"\n[targets.dev]\nmode = "workspace"\ncommand = "x"\nport = 80\npublic_domain = "x.exemple.fr"\n`,
+      "clé « public_domain » inattendue en mode workspace",
+    );
+  });
+
+  it("refuse ce qui n'est pas un domaine — URL, chemin, nom sans point", () => {
+    for (const valeur of ['"https://budget.exemple.fr"', '"budget.exemple.fr/app"', '"budget"', "8080"]) {
+      refuses(
+        `name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\npublic_domain = ${valeur}\n`,
+        "« public_domain » doit être un nom de domaine",
+      );
+    }
+  });
+
+  it("fait l'aller-retour à la sérialisation", () => {
+    const manifest = parseManifest(
+      `name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\npublic_domain = "budget.exemple.fr"\n`,
+    );
+    const toml = serializeManifest(manifest);
+    assert.match(toml, /public_domain = "budget\.exemple\.fr"/);
     assert.deepEqual(parseManifest(toml), manifest);
   });
 });

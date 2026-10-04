@@ -11,6 +11,7 @@
  */
 
 import { readdir, readFile } from "node:fs/promises";
+import { isLabel } from "./manifest.ts";
 import type { Descriptor } from "./plan.ts";
 import type { State } from "./up.ts";
 
@@ -61,6 +62,41 @@ export function statusOf(containers: Container[]): Status {
 }
 
 /**
+ * Un `dbox.json` écrit par une version antérieure n'a pas les champs ajoutés
+ * depuis — quatre apps sur `serve` sont dans ce cas au moment où ces lignes
+ * sont écrites. Sans ce complément, le type promettrait un tableau là où il
+ * n'y a rien, et le premier `.map()` planterait le tableau de bord sur un
+ * dossier ancien. Le fichier sur le disque n'est pas réécrit pour autant :
+ * il le sera au prochain déploiement, par le plan.
+ */
+function complete(descriptor: Descriptor): Descriptor {
+  return {
+    ...descriptor,
+    services: descriptor.services ?? [],
+    publicDomain: descriptor.publicDomain ?? null,
+  };
+}
+
+/**
+ * Un `dbox.json` est relu depuis le disque : on ne croit pas ce qu'il annonce.
+ * DBox n'en écrit qu'à partir d'un manifeste validé, donc son app et sa cible
+ * sont des labels DNS, et ce sont les noms des dossiers qui le contiennent.
+ * Une entrée qui ne remplit pas ces deux conditions n'a pas été écrite par
+ * DBox : elle est écartée, jamais affichée. Sans ce contrôle, un nom piégé
+ * finissait dans la page — c'est ainsi qu'il atteignait une expression Alpine.
+ */
+function estFiable(descriptor: Descriptor, app: string, target: string): boolean {
+  return (
+    typeof descriptor.app === "string" &&
+    typeof descriptor.target === "string" &&
+    descriptor.app === app &&
+    descriptor.target === target &&
+    isLabel(app) &&
+    isLabel(target)
+  );
+}
+
+/**
  * Balaie `<root>/<app>/<cible>/`. Un dossier sans `dbox.json` est ignoré en
  * silence : ce n'est pas une cible DBox, ce n'est pas une erreur.
  */
@@ -71,8 +107,9 @@ export async function scan(root: string, listContainers: () => Promise<string>):
   for (const app of await subdirectories(root)) {
     for (const target of await subdirectories(`${root}/${app}`)) {
       const directory = `${root}/${app}/${target}`;
-      const descriptor = await readJson<Descriptor>(`${directory}/dbox.json`);
-      if (descriptor === null) continue;
+      const brut = await readJson<Descriptor>(`${directory}/dbox.json`);
+      if (brut === null || !estFiable(brut, app, target)) continue;
+      const descriptor = complete(brut);
 
       const containers = byProject.get(descriptor.project) ?? [];
       entries.push({
@@ -89,6 +126,25 @@ export async function scan(root: string, listContainers: () => Promise<string>):
     `${a.descriptor.app}/${a.descriptor.target}`.localeCompare(`${b.descriptor.app}/${b.descriptor.target}`),
   );
   return entries;
+}
+
+/**
+ * Les descripteurs de toutes les cibles déployées sous `root`, sans lire l'état
+ * Docker — `up()` s'en sert pour refuser deux cibles qui revendiqueraient le
+ * même `public_domain`. Un `docker ps` serait inutile ici : seul le contenu des
+ * `dbox.json` compte, pas ce qui tourne à cet instant.
+ */
+export async function listDescriptors(root: string): Promise<Descriptor[]> {
+  const found: Descriptor[] = [];
+
+  for (const app of await subdirectories(root)) {
+    for (const target of await subdirectories(`${root}/${app}`)) {
+      const descriptor = await readJson<Descriptor>(`${root}/${app}/${target}/dbox.json`);
+      if (descriptor !== null && estFiable(descriptor, app, target)) found.push(complete(descriptor));
+    }
+  }
+
+  return found;
 }
 
 async function subdirectories(path: string): Promise<string[]> {

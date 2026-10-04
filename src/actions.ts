@@ -14,7 +14,9 @@ import { draft, nameFromDirectory, renderManifest, renderScaffold, targetNameFor
 import { parseManifest, serializeManifest, type Manifest, type Target } from "./manifest.ts";
 import { clone, isGitRepo, nameFromUrl, pull } from "./sources.ts";
 import { resolveKeyFile } from "./sshkey.ts";
-import type { Entry } from "./registry.ts";
+import { lireSiFichierOrdinaire } from "./lecture.ts";
+import { SOUS_DOSSIERS_FRONT } from "./preflight.ts";
+import { listDescriptors, type Entry } from "./registry.ts";
 import { readState, writeState } from "./state.ts";
 import { sourceTag } from "./tag.ts";
 import { up, type UpResult } from "./up.ts";
@@ -26,6 +28,15 @@ export function startTarget(entry: Entry, compose: Compose): Promise<RunResult> 
 
 export function stopTarget(entry: Entry, compose: Compose): Promise<RunResult> {
   return compose(entry.directory, ["stop"]);
+}
+
+/**
+ * Un `restart`, pas un `stop` puis un `start` : c'est ce qu'on taperait, et
+ * c'est le geste dont on a besoin quand un conteneur s'est mis de travers sans
+ * que rien n'ait changé — inutile de reconstruire, inutile de redéployer.
+ */
+export function restartTarget(entry: Entry, compose: Compose): Promise<RunResult> {
+  return compose(entry.directory, ["restart"]);
 }
 
 export async function logsOf(entry: Entry, compose: Compose, lines: number): Promise<string> {
@@ -74,6 +85,47 @@ export async function writeEnv(
   write: (path: string, content: string) => Promise<void>,
 ): Promise<void> {
   await write(`${entry.directory}/.env`, serializeEnv(entries));
+}
+
+/**
+ * Les fichiers que DBox a produits pour une cible, tels qu'ils sont sur le
+ * disque. `doc/REFERENCE.md` fait une vertu de ce qu'ils soient lisibles —
+ * encore faut-il pouvoir les lire sans ouvrir un shell sur la machine.
+ *
+ * **Liste blanche, jamais une liste noire** : les noms sont des constantes du
+ * code, aucune requête ne peut en désigner un autre, et un fichier ajouté un
+ * jour au plan reste invisible tant qu'on ne l'a pas inscrit ici — l'inverse
+ * (tout montrer sauf…) aurait exposé le prochain fichier sensible par défaut.
+ *
+ * Deux absents délibérés : `ts.env`, qui porte la clé d'authentification et
+ * n'a pas à s'afficher dans un navigateur (même raison que `readEnv`), et
+ * `.env`, qui a son propre panneau avec les valeurs masquées — le montrer ici
+ * contournerait ce masquage.
+ *
+ * L'ordre est celui de la lecture, pas celui du plan : le Compose d'abord,
+ * c'est lui qu'on ouvre quand ça ne marche pas — le panneau déplie le premier.
+ */
+export const FICHIERS_MONTRABLES = ["docker-compose.yml", "serve.json", "dbox.json"];
+
+export interface FichierMontre {
+  name: string;
+  content: string;
+}
+
+export async function readGeneratedFiles(
+  entry: Entry,
+  read: (path: string) => Promise<string>,
+): Promise<FichierMontre[]> {
+  const lus = await Promise.all(
+    FICHIERS_MONTRABLES.map(async (name) => ({
+      name,
+      // Un fichier absent n'est pas une erreur : `serve.json` ne suit pas
+      // forcément un plan d'une autre époque, et le panneau doit s'ouvrir
+      // quand même sur ce qui existe.
+      content: await read(`${entry.directory}/${name}`).catch(() => null),
+    })),
+  );
+  return lus.filter((f): f is FichierMontre => f.content !== null);
 }
 
 /**
@@ -190,6 +242,10 @@ export interface NewTargetChoice {
   mode: NewTargetMode;
   port: number;
   command?: string;
+  /** `devcontainer` : image de l'environnement, quand Node ne convient pas. */
+  image?: string;
+  /** `devcontainer` : construire l'image du projet — prime sur `image`. */
+  dockerfile?: string;
 }
 
 /**
@@ -289,17 +345,26 @@ export async function listWorkspaces(
  * la corrige de toute façon en la tapant.
  */
 async function suggestedCommand(directory: string, readFile: (path: string) => Promise<string>): Promise<string | null> {
-  let raw: string;
-  try {
-    raw = await readFile(`${directory}/package.json`);
-  } catch {
-    return null;
+  if (await aUnScriptDev(`${directory}/package.json`, readFile)) return "npm run dev";
+
+  // Les sous-dossiers ne sont sondés **que si la racine n'a rien donné** : le
+  // cas courant reste à une seule lecture, et `listWorkspaces` appelle cette
+  // fonction pour chaque dossier de la racine des espaces de travail.
+  for (const sous of SOUS_DOSSIERS_FRONT) {
+    if (await aUnScriptDev(`${directory}/${sous}/package.json`, readFile)) {
+      return `npm --prefix ${sous} run dev`;
+    }
   }
+  return null;
+}
+
+/** Absent, illisible, ou sans script `dev` : `false`, jamais une exception. */
+async function aUnScriptDev(path: string, readFile: (path: string) => Promise<string>): Promise<boolean> {
   try {
-    const pkg = JSON.parse(raw) as { scripts?: Record<string, string> };
-    return pkg.scripts?.dev !== undefined ? "npm run dev" : null;
+    const pkg = JSON.parse(await readFile(path)) as { scripts?: Record<string, string> };
+    return pkg.scripts?.dev !== undefined;
   } catch {
-    return null;
+    return false;
   }
 }
 
@@ -325,6 +390,59 @@ export async function addLocalApp(
 
   await ensureScaffold(directory, nameFromDirectory(directory), options, log, choice);
   return deployFrom(directory, choice === undefined ? null : targetNameFor(choice.mode), compose, options, log);
+}
+
+/**
+ * Ce que l'ajout écrira comme `dbox.toml`, montré **avant** de cliquer.
+ *
+ * Même décision que `ensureScaffold`, en lecture seule : un manifeste déjà là
+ * gagne toujours ; sinon le squelette du formulaire (`workspace` et
+ * `devcontainer`) ou la déduction depuis le Dockerfile (`deployed`). Pour un
+ * dépôt pas encore cloné, il n'y a rien à lire : l'aperçu le dit au lieu
+ * d'inventer un port.
+ */
+export interface Apercu {
+  contenu: string | null;
+  note: string;
+}
+
+export async function apercuManifeste(
+  demande: { source: "git" | "local"; url: string; name: string | null; dossier: string | null },
+  choice: NewTargetChoice | undefined,
+  readFile: (path: string) => Promise<string>,
+): Promise<Apercu> {
+  if (demande.source === "local") {
+    if (demande.dossier === null) return { contenu: null, note: "choisis un dossier" };
+    const existant = await readFile(`${demande.dossier}/dbox.toml`).catch(() => null);
+    if (existant !== null) {
+      return { contenu: existant, note: "ce dossier a déjà un dbox.toml : il est utilisé tel quel, le formulaire n'y change rien" };
+    }
+    const nom = nameFromDirectory(demande.dossier);
+    if (choice !== undefined && choice.mode !== "deployed") {
+      return { contenu: renderScaffold({ name: nom, ...choice }), note: "écrit dans le dossier au moment de l'ajout" };
+    }
+    const dockerfile = await readFile(`${demande.dossier}/Dockerfile`).catch(() => null);
+    if (dockerfile === null) {
+      return { contenu: null, note: "pas de Dockerfile dans ce dossier : le mode prod en a besoin pour construire l'image" };
+    }
+    return {
+      contenu: renderManifest(draft(demande.dossier, dockerfile), !/^EXPOSE\s/im.test(dockerfile)),
+      note: "déduit du Dockerfile du dossier",
+    };
+  }
+
+  if (demande.url === "") return { contenu: null, note: "colle l'adresse du dépôt" };
+  const nom = nameFromDirectory(demande.name ?? nameFromUrl(demande.url));
+  if (choice !== undefined && choice.mode !== "deployed") {
+    return {
+      contenu: renderScaffold({ name: nom, ...choice }),
+      note: "sauf si le dépôt a déjà son propre dbox.toml — il serait alors utilisé tel quel",
+    };
+  }
+  return {
+    contenu: null,
+    note: `mode prod : le manifeste de « ${nom} » sera déduit du Dockerfile du dépôt après clonage (port d'EXPOSE, volume de VOLUME) — ou repris tel quel si le dépôt en a déjà un`,
+  };
 }
 
 /**
@@ -384,6 +502,10 @@ async function deployFrom(
       seedAuthKey,
       readState,
       writeState,
+      // Pas le lecteur injecté habituel : un fichier du projet peut être un tube
+      // nommé qui bloquerait le déploiement pour toujours (voir `lecture.ts`).
+      readSource: lireSiFichierOrdinaire,
+      listDescriptors: () => listDescriptors(options.ctx.root),
       sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
       now: Date.now,
       log,

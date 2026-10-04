@@ -62,6 +62,21 @@ export interface Config {
    * conteneur du daemon ne monte rien en dehors de `root`/`sources`.
    */
   workspacesRoot?: string;
+  /**
+   * Nom du réseau Docker **externe** que le Traefik déjà en service sur cette
+   * machine écoute — nécessaire dès qu'une cible pose `public_domain`. DBox ne
+   * crée jamais ce réseau et ne touche jamais à la configuration de ce
+   * Traefik : il se contente de poser les labels que son provider Docker
+   * découvre tout seul. Absent : `public_domain` est un refus, jamais un
+   * défaut deviné.
+   */
+  traefikNetwork?: string;
+  /**
+   * Nom du resolver ACME déclaré dans la config statique de ce Traefik
+   * (`certificatesResolvers`, par exemple « letsencrypt ») — jamais en dur
+   * dans le compose généré. DBox ne gère aucun certificat lui-même.
+   */
+  traefikCertResolver?: string;
 }
 
 const KEYS: Record<string, keyof Config> = {
@@ -78,6 +93,8 @@ const KEYS: Record<string, keyof Config> = {
   ssh_key_file: "sshKeyFile",
   machines_file: "machinesFile",
   workspaces_root: "workspacesRoot",
+  traefik_network: "traefikNetwork",
+  traefik_cert_resolver: "traefikCertResolver",
 };
 
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
@@ -123,6 +140,8 @@ const ORDER: (keyof Config)[] = [
   "sshKeyFile",
   "machinesFile",
   "workspacesRoot",
+  "traefikNetwork",
+  "traefikCertResolver",
 ];
 const KEY_NAMES = Object.fromEntries(Object.entries(KEYS).map(([k, v]) => [v, k])) as Record<
   keyof Config,

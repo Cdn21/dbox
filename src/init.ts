@@ -85,6 +85,14 @@ export interface ScaffoldInput {
   /** Obligatoire en `workspace`/`devcontainer` — jamais deviné, il n'y a rien
    * à lire pour ça avant que l'app existe. */
   command?: string;
+  /** `devcontainer` seulement : l'image de l'environnement, quand celle par
+   * défaut (Node) ne convient pas — un projet Python, Go, PHP… Absente : le
+   * défaut du manifeste s'applique. */
+  image?: string;
+  /** `devcontainer` seulement : construire l'image du projet au lieu d'en
+   * prendre une toute faite — le cas dès qu'il mêle deux runtimes. **Prime sur
+   * `image`** quand les deux sont donnés (voir `appService` dans compose.ts). */
+  dockerfile?: string;
 }
 
 /**
@@ -95,10 +103,20 @@ export function renderScaffold(input: ScaffoldInput): string {
   const target = targetNameFor(input.mode);
   const lines = [`name = "${input.name}"`, "", `[targets.${target}]`, `mode = "${input.mode}"`];
 
+  const echappe = (valeur: string) => valeur.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+
   if (input.mode !== "deployed") {
-    lines.push(`command = "${(input.command ?? "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
+    lines.push(`command = "${echappe(input.command ?? "")}"`);
   }
   lines.push(`port = ${input.port}`);
+  // Réservés au devcontainer : le mode `workspace` ne conteneurise rien, et le
+  // mode `deployed` construit toujours depuis le Dockerfile du projet.
+  if (input.mode === "devcontainer") {
+    if (input.image !== undefined && input.image !== "") lines.push(`image = "${echappe(input.image)}"`);
+    if (input.dockerfile !== undefined && input.dockerfile !== "") {
+      lines.push(`dockerfile = "${echappe(input.dockerfile)}"`);
+    }
+  }
   lines.push(
     "",
     '# health = "/api/session"   # chemin interrogé après déploiement (défaut « / »)',

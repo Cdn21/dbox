@@ -1,0 +1,88 @@
+# Intégration continue de DBox.
+#
+# À chaque push, sur toutes les branches : typecheck et suite complète, dans un
+# conteneur Node 24 (la version qui exécute DBox). Sur `main` seulement, une fois
+# tout vert, la dernière étape avance la branche `production` jusqu'à ce commit.
+#
+# Le déploiement n'est PAS fait ici. Chaque machine tire `production` elle-même
+# (deploy/maj-auto.sh, lancé par cron) : aucune clé vers les machines n'entre
+# dans la CI. C'est voulu — le runner exécute ses jobs dans un Docker-in-Docker
+# isolé précisément pour qu'un workflow ne puisse jamais atteindre la production.
+#
+# Le jeton du job, lui, peut pousser `production` — et il est accessible à
+# TOUTES les étapes : le runner le pose dans l'environnement de chacune
+# (GITHUB_TOKEN, FORGEJO_TOKEN ; vérifié le 4 octobre 2026 par empreintes).
+# `persist-credentials: false` ne fait que le retirer de .git/config. Du code
+# lancé par `npm ci`, `tsc` ou les tests peut donc pousser `production`. Ce qui
+# protège, c'est la machine qui tire, pas ce fichier :
+#   - `main` est une branche protégée que ce jeton ne peut pas pousser ;
+#   - les machines refusent un commit de `production` absent de `main`, et un
+#     commit qui ne descend pas de la version en place (deploy/maj-auto.sh) :
+#     ni code étranger, ni retour silencieux à une version plus ancienne.
+#
+# `production`, elle, ne doit PAS être une branche protégée : le hook de Forgejo
+# (v12) cherche l'auteur du push parmi les utilisateurs, et celui du jeton de la
+# CI n'en est pas un (uid -2). Le push échoue alors en « Internal Server Error »,
+# avec ou sans liste d'autorisation. Vécu le 4 octobre 2026.
+#
+# Un seul job, volontairement : avec `needs:` entre deux jobs, le runner de cette
+# forge (forgejo-runner v6.4) s'arrête avant même d'évaluer le `if` du second
+# (« 'runs-on' key not defined in ci/tests »). Une étape conditionnelle en fin de
+# job fait la même chose : elle ne s'exécute que si toutes les précédentes ont
+# réussi.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    container:
+      image: node:24-bookworm
+    steps:
+      # Épinglée par commit (v4.4.0) et non par étiquette : une étiquette se
+      # déplace, et cette action s'exécute avant tout le reste.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # L'historique complet : l'étape « production » compare des ancêtres.
+          fetch-depth: 0
+          # Le jeton ne reste pas dans .git/config pour la suite du job (il reste
+          # dans l'environnement de chaque étape, voir plus haut).
+          persist-credentials: false
+
+      - name: Dépendances de l'outillage (typescript, @types/node)
+        run: npm ci --no-audit --no-fund --ignore-scripts
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        run: node --test test/*.test.ts
+
+      - name: Avancer la branche production
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          JETON: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          # Passé explicitement plutôt que lu dans l'environnement implicite :
+          # ce qui est utilisé reste visible ici. Jamais écrit sur le disque.
+          auth() { git -c "http.extraHeader=Authorization: token $JETON" "$@"; }
+          # Seulement en avance rapide : si `production` est déjà plus loin (un
+          # passage plus récent a fini avant celui-ci), on ne recule jamais ; si
+          # elle a divergé de main, on refuse d'écraser.
+          if auth fetch --quiet origin production 2>/dev/null; then
+            if git merge-base --is-ancestor "$GITHUB_SHA" origin/production; then
+              echo "production contient déjà $GITHUB_SHA : rien à faire."
+              exit 0
+            fi
+            if ! git merge-base --is-ancestor origin/production "$GITHUB_SHA"; then
+              echo "production a divergé de main : refus d'écraser, à corriger à la main." >&2
+              exit 1
+            fi
+          fi
+          auth push origin "$GITHUB_SHA:refs/heads/production"
+          echo "production → $GITHUB_SHA"

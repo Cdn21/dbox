@@ -10,14 +10,17 @@ import { createInterface } from "node:readline/promises";
 import { configPath, loadConfig, serializeConfig, type Config } from "./config.ts";
 import { draft, renderManifest } from "./init.ts";
 import { checkUpstream, clone, isGitRepo, nameFromUrl, pull } from "./sources.ts";
-import { DEFAULT_CONTEXT, type Context } from "./compose.ts";
+import { DEFAULT_CONTEXT, type Context, type TraefikConfig } from "./compose.ts";
 import { composeRunner, run } from "./docker.ts";
+import { avecCache, versionInfo } from "./versions.ts";
+import { versionAffichee, versionDuPaquet } from "./version.ts";
 import { httpProbe } from "./health.ts";
 import { ManifestError, parseManifest, type Manifest } from "./manifest.ts";
 import { planFor, type Plan } from "./plan.ts";
-import { PS_ARGS, scan, since, type Entry } from "./registry.ts";
+import { listDescriptors, PS_ARGS, scan, since, type Entry } from "./registry.ts";
 import { addApp, addLocalApp, listWorkspaces, redeploy, removeTarget, resolveWorkspacePath } from "./actions.ts";
 import { readAuthkeyNotice } from "./authkey.ts";
+import { lireSiFichierOrdinaire } from "./lecture.ts";
 import { Jobs } from "./jobs.ts";
 import { startPolling } from "./poller.ts";
 import { checkOrphansOnce, STALE_AFTER_DAYS, startCheckingOrphans } from "./orphans.ts";
@@ -37,6 +40,7 @@ import { seedAuthKey, writeFiles } from "./writer.ts";
 
 const USAGE = `dbox <setup|add|init|plan|up|rm|ls|serve|rotate-authkey> [dossier|url|app] [options]
 
+  --version         la version de cette copie de DBox
   setup             configure cette machine une fois pour toutes (interactif)
   add <url>         clone un dépôt, écrit son manifeste au besoin, et déploie
   init              écrit un dbox.toml à partir du dossier et de son Dockerfile
@@ -55,6 +59,8 @@ const USAGE = `dbox <setup|add|init|plan|up|rm|ls|serve|rotate-authkey> [dossier
   --tailnet <nom>   domaine du tailnet (défaut $DBOX_TAILNET)
   --tag <tag>       version à déployer (défaut : le SHA git des sources)
   --ts-tag <tag>    tag ACL des nœuds (défaut ${DEFAULT_CONTEXT.tsTag}) ; vide pour n'en annoncer aucun
+  --traefik-network <nom>        réseau Docker externe du Traefik de cette machine (mode public)
+  --traefik-cert-resolver <nom>  resolver ACME de ce Traefik (mode public)
   --timeout <s>     délai du contrôle de santé (défaut 180)
   --port <n>        (serve) port d'écoute (défaut 8099)
   --host <adresse>  (serve) interface d'écoute (défaut 0.0.0.0)
@@ -88,6 +94,10 @@ interface Options {
   tailnet: string;
   tag?: string;
   tsTag: string | null;
+  /** Les deux se posent ensemble ou pas du tout — sans eux, une cible qui
+   * demande `public_domain` est refusée, jamais routée vers un Traefik deviné. */
+  traefikNetwork?: string;
+  traefikCertResolver?: string;
   timeoutMs: number;
   port: number;
   host: string;
@@ -133,6 +143,10 @@ async function main(argv: string[]): Promise<number> {
     process.stdout.write(USAGE);
     return command === undefined ? 1 : 0;
   }
+  if (command === "--version" || command === "-v") {
+    process.stdout.write(`dbox ${versionAffichee(process.env["DBOX_VERSION"], versionDuPaquet())}\n`);
+    return 0;
+  }
   if (!["setup", "add", "init", "plan", "up", "rm", "ls", "serve", "rotate-authkey"].includes(command)) {
     process.stderr.write(`commande inconnue « ${command} »\n\n${USAGE}`);
     return 1;
@@ -155,6 +169,17 @@ async function main(argv: string[]): Promise<number> {
     process.stderr.write(
       "tailnet inconnu : précise --tailnet <nom>.ts.net ou pose $DBOX_TAILNET\n",
     );
+    return 1;
+  }
+
+  // Un seul des deux posé est une faute de saisie, à signaler tout de suite
+  // plutôt qu'un « traefik non configuré » vague au premier déploiement public.
+  if (
+    command !== "ls" &&
+    command !== "rm" &&
+    (options.traefikNetwork === undefined) !== (options.traefikCertResolver === undefined)
+  ) {
+    process.stderr.write("--traefik-network et --traefik-cert-resolver se posent ensemble, ou pas du tout\n");
     return 1;
   }
 
@@ -208,12 +233,19 @@ async function runUpAt(directory: string, options: Options): Promise<number> {
   return await runUp(manifest, contextFor(options, directory), options, directory);
 }
 
+/** Les deux réglages se posent ensemble ou pas du tout — vérifié dans `main`. */
+function traefikConfigFor(options: Options): TraefikConfig | null {
+  if (options.traefikNetwork === undefined || options.traefikCertResolver === undefined) return null;
+  return { network: options.traefikNetwork, certResolver: options.traefikCertResolver };
+}
+
 function contextFor(options: Options, directory: string): Context {
   return {
     ...DEFAULT_CONTEXT,
     root: options.root,
     tailnet: options.tailnet,
     tsTag: options.tsTag,
+    traefik: traefikConfigFor(options),
     uid: process.getuid?.() ?? 1000,
     gid: process.getgid?.() ?? 1000,
     sourcePath: directory,
@@ -295,6 +327,8 @@ async function runUp(
       seedAuthKey,
       readState,
       writeState,
+      listDescriptors: () => listDescriptors(ctx.root),
+      readSource: lireSiFichierOrdinaire,
       sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
       now: Date.now,
       log,
@@ -306,7 +340,7 @@ async function runUp(
   log("");
   log(`échec : ${result.failure}`);
   if (result.detail !== null) log(result.detail.replace(/^/gm, "  "));
-  if (result.failure === "construction") {
+  if (result.failure === "construction" || result.failure === "domaine") {
     log("la version en place n'a pas été touchée.");
   } else if (result.rolledBackTo !== null) {
     log(`retour effectué sur ${result.rolledBackTo}.`);
@@ -635,6 +669,7 @@ function runServe(options: Options): Promise<number> {
     root: options.root,
     tailnet: options.tailnet,
     tsTag: options.tsTag,
+    traefik: traefikConfigFor(options),
     uid: process.getuid?.() ?? 1000,
     gid: process.getgid?.() ?? 1000,
     // Écrasé pour chaque cible par le chemin lu dans son dbox.json.
@@ -700,8 +735,17 @@ function runServe(options: Options): Promise<number> {
       options.tagReportFile === undefined
         ? undefined
         : () => readTagReport(options.tagReportFile!, (p) => readFile(p, "utf8")),
+    // Ce que ce daemon a reçu au démarrage — affiché en lecture seule, il ne
+    // peut pas le réécrire lui-même (ni config.toml ni deploy/.env montés).
+    traefik: ctx.traefik === null ? undefined : { ...ctx.traefik },
+    // Gravée dans l'image par deploy-to.sh (ARG DBOX_VERSION) — le conteneur
+    // ne peut pas la déduire, il n'a ni git ni dépôt.
+    version: process.env["DBOX_VERSION"],
     sshKeyStatus,
     listWorkspaces: workspacesList,
+    // Jamais de fetch (voir versions.ts), et une minute de cache : la liste se
+    // rend toutes les 15 s, par chaque onglet ouvert.
+    versionInfo: avecCache((source, tag) => versionInfo(source, tag, (args) => run("git", args))),
     appSshKeyStatus,
     machines: machinesList,
     workspacesRoot,
@@ -833,6 +877,8 @@ function parseArgs(args: string[], config: Config = {}): Options {
     root: config.root ?? DEFAULT_CONTEXT.root,
     tailnet: config.tailnet ?? process.env["DBOX_TAILNET"] ?? "<tailnet>.ts.net",
     tsTag: config.tsTag ?? DEFAULT_CONTEXT.tsTag,
+    traefikNetwork: config.traefikNetwork,
+    traefikCertResolver: config.traefikCertResolver,
     authkeyFile: config.authkeyFile,
     // Même dossier par défaut, même règle que ssh_key/machines.json : pas de
     // question de plus à poser dans `dbox setup`.
@@ -893,6 +939,18 @@ function parseArgs(args: string[], config: Config = {}): Options {
         // Chaîne vide = ne rien annoncer, tant que `tagOwners` n'est pas déclaré.
         const value = expect(args, ++i, arg);
         options.tsTag = value === "" ? null : value;
+        break;
+      }
+      // Chaîne vide = non renseigné, même idiome que --workspaces-root : le
+      // passage par deploy/docker-compose.yml pose toujours la variable.
+      case "--traefik-network": {
+        const value = expect(args, ++i, arg);
+        if (value !== "") options.traefikNetwork = value;
+        break;
+      }
+      case "--traefik-cert-resolver": {
+        const value = expect(args, ++i, arg);
+        if (value !== "") options.traefikCertResolver = value;
         break;
       }
       case "--sources":

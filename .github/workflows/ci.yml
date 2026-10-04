@@ -1,6 +1,7 @@
-# Rien pour le mainteneur solo — les tests et le typecheck tournent déjà à la
-# main avant chaque déploiement. Ce workflow sert le jour où quelqu'un d'autre
-# ouvre une pull request : un signal avant même de la relire.
+# Miroir public (GitHub) uniquement : la CI qui compte tourne sur la forge
+# Forgejo (.forgejo/workflows/ci.yml), à chaque push, et c'est elle qui fait
+# avancer la production. Ce workflow-ci sert le jour où quelqu'un ouvre une pull
+# request sur le miroir : un signal avant même de la relire.
 name: CI
 
 on:

@@ -1,7 +1,7 @@
 /**
  * htmx et Alpine, vendorisés — jamais chargés depuis un CDN, cohérent avec
  * « la page tient dans une seule requête, sans ressource externe » : le
- * daemon sert ces fichiers lui-même, comme `icon.svg`. Voir `vendor/README.md`
+ * daemon sert ces fichiers lui-même, comme `icon.svg`. Voir `doc/VENDOR.md`
  * pour les versions et la marche à suivre pour les mettre à jour.
  */
 

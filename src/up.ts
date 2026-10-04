@@ -15,7 +15,8 @@ import type { Context } from "./compose.ts";
 import type { Compose } from "./docker.ts";
 import { waitUntilHealthy, type Probe, type WaitResult } from "./health.ts";
 import type { Manifest } from "./manifest.ts";
-import { planFor, type Plan, type PlannedFile } from "./plan.ts";
+import { planFor, type Descriptor, type Plan, type PlannedFile } from "./plan.ts";
+import { CHEMINS_SONDES, preflight } from "./preflight.ts";
 import type { WriteOutcome } from "./writer.ts";
 
 export interface State {
@@ -31,6 +32,14 @@ export interface UpDeps {
   seedAuthKey: (outcomes: WriteOutcome[], keyFile: string | undefined) => Promise<string | null>;
   readState: (directory: string) => Promise<State | null>;
   writeState: (directory: string, state: State) => Promise<void>;
+  /** Les cibles déjà déployées sur cette machine — sert **uniquement** à
+   * refuser un `public_domain` en double, jamais à autre chose. Injectée comme
+   * le reste : la vérification a besoin du disque, `planFor` doit rester pur. */
+  listDescriptors: () => Promise<Descriptor[]>;
+  /** Lit un fichier du projet pour le contrôle d'avant-construction. `null`
+   * si absent — jamais une exception : l'absence est l'information utile, et
+   * la plupart des chemins sondés n'existent pas. */
+  readSource: (path: string) => Promise<string | null>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
   log: (line: string) => void;
@@ -48,7 +57,7 @@ export interface UpOptions {
   healthIntervalMs?: number;
 }
 
-export type Failure = "construction" | "démarrage" | "santé";
+export type Failure = "construction" | "démarrage" | "santé" | "domaine";
 
 export interface UpResult {
   ok: boolean;
@@ -81,12 +90,56 @@ export async function up(options: UpOptions, deps: UpDeps): Promise<UpResult> {
 
   deps.log(`${manifest.name} · ${target} · ${tag}`);
 
+  // Avant toute écriture : deux cibles au même domaine et Traefik en router une
+  // au hasard, en silence. Le refus doit donc arriver ici, pas après coup.
+  // L'exclusion de la cible elle-même laisse passer un redéploiement.
+  if (plan.publicDomain !== null) {
+    const conflict = (await deps.listDescriptors()).find(
+      (d) => d.publicDomain === plan.publicDomain && (d.app !== manifest.name || d.target !== target),
+    );
+    if (conflict !== undefined) {
+      result.failure = "domaine";
+      result.detail =
+        `« ${plan.publicDomain} » est déjà utilisé par ${conflict.app} · ${conflict.target} — ` +
+        `Traefik ne peut router un domaine que vers une seule cible`;
+      deps.log(`  refusé : ${result.detail}`);
+      return result;
+    }
+  }
+
+  // Ce qui va casser, dit avant de construire — jamais un refus : ces contrôles
+  // sont des heuristiques (voir `preflight.ts`). Placé ici pour que le message
+  // arrive avant les deux minutes de construction, pas après.
+  const cible = manifest.targets[target];
+  if (cible !== undefined) {
+    const lus = await Promise.all(
+      CHEMINS_SONDES.map(async (chemin) => [chemin, await deps.readSource(`${ctx.sourcePath}/${chemin}`)] as const),
+    );
+    const fichiers = new Map(lus.filter((paire): paire is [string, string] => paire[1] !== null));
+    for (const avis of preflight(plan, cible, fichiers)) deps.log(`  ⚠ ${avis.message}`);
+  }
+
   const outcomes = await deps.writeFiles(plan.files);
   for (const outcome of outcomes) {
     if (!outcome.written) deps.log(`  préservé  ${outcome.path}`);
   }
   const seeded = await deps.seedAuthKey(outcomes, options.authkeyFile);
   if (seeded !== null) deps.log(`  clé posée ${seeded}`);
+
+  // Un compagnon lit ses réglages dans le même `.env` que l'app, et ce fichier
+  // vient d'être créé vide : `postgres` sans POSTGRES_PASSWORD redémarre en
+  // boucle pendant que l'app répond 200 et que le déploiement se dit réussi.
+  // Vécu au premier déploiement réel. Dit ici plutôt que constaté après coup —
+  // et pas par un `docker compose ps` juste après le démarrage, essayé puis
+  // écarté : à cet instant le conteneur affiche encore « running », il ne
+  // plante qu'une seconde plus tard.
+  const envNeuf = outcomes.some((outcome) => outcome.written && outcome.path.endsWith("/.env"));
+  if (envNeuf && plan.services.length > 0) {
+    deps.log(
+      `  ⚠ ${plan.services.join(", ")} : leurs variables se posent dans ${plan.directory}/.env, ` +
+        `qui vient d'être créé vide — une image comme postgres refuse de démarrer sans les siennes`,
+    );
+  }
 
   if (plan.builds) {
     deps.log("  construction…");
@@ -177,6 +230,18 @@ async function rollback(
   }
 
   deps.log(`  retour à ${previous.tag}…`);
+
+  // Un compagnon qui stocke rend cette promesse partielle, et mieux vaut le
+  // dire que de laisser croire à un retour complet : revenir à l'image d'avant
+  // ne défait pas une migration déjà appliquée à la base.
+  const cible = options.manifest.targets[options.target];
+  const avecEtat =
+    cible !== undefined &&
+    cible.mode !== "workspace" &&
+    Object.values(cible.services).some((service) => service.data !== null);
+  if (avecEtat) {
+    deps.log("  ⚠ le retour arrière ramène l'image, jamais les données d'un service compagnon");
+  }
   const restored = planFor(options.manifest, options.target, {
     ...options.ctx,
     imageTag: previous.tag,
@@ -185,9 +250,12 @@ async function rollback(
   if (compose === undefined) return null;
 
   await deps.writeFiles([compose]);
-  const back = await deps.compose(restored.directory, ["up", "-d"]);
+  // `--no-build` : si l'image précédente a disparu (un `prune`), Compose la
+  // reconstruirait depuis les sources ACTUELLES — celles qui viennent d'échouer
+  // — et la taguerait comme l'ancienne. Mieux vaut un échec franc.
+  const back = await deps.compose(restored.directory, ["up", "-d", "--no-build"]);
   if (back.code !== 0) {
-    deps.log("  le retour arrière a échoué lui aussi — intervention manuelle nécessaire");
+    deps.log(`  le retour arrière a échoué lui aussi (l'image ${previous.tag} existe-t-elle encore ?) — intervention manuelle nécessaire`);
     return null;
   }
   return previous.tag;

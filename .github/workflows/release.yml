@@ -1,0 +1,89 @@
+# Publie une version : au push d'un tag vX.Y.Z sur ce dépôt public, construit
+# l'image du daemon pour amd64 et arm64, la pousse sur ghcr.io, et crée la
+# Release GitHub avec l'extrait du changelog.
+#
+# Pourquoi ici et pas sur la forge privée : le jeton intégré de GitHub suffit à
+# pousser sur ghcr.io, aucun secret n'est stocké nulle part. Sur la forge, il
+# aurait fallu y déposer un jeton GitHub — et un jeton de CI est lisible par
+# toutes les étapes du job (vérifié sur Forgejo le 4 octobre 2026). L'image est
+# aussi construite exactement depuis le code public, celui que l'utilisateur lit.
+#
+# Les actions sont épinglées par commit, pas par étiquette : une étiquette se
+# déplace, et ce job a le droit d'écrire dans les paquets du dépôt.
+
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write   # créer la Release
+  packages: write   # pousser sur ghcr.io
+
+jobs:
+  publier:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Version
+        id: v
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # Le tag doit dire la même chose que package.json : une image 1.2.0
+          # qui annoncerait 1.1.0 dans `dbox --version` serait pire que rien.
+          paquet=$(node -p 'require("./package.json").version')
+          if [ "$version" != "$paquet" ]; then
+            echo "le tag $GITHUB_REF_NAME ne correspond pas à package.json ($paquet)" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/dbox
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: DBOX_VERSION=${{ steps.v.outputs.version }}
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          # La section de cette version dans le changelog, sans son titre.
+          awk -v v="$VERSION" '
+            /^## \[/ { dedans = index($0, "[" v "]") > 0; next }
+            dedans' doc/CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "aucune section [$VERSION] dans doc/CHANGELOG.md" >&2
+            exit 1
+          fi
+          # Les accents graves sont le bloc de code Markdown des notes, voulus tels quels.
+          # shellcheck disable=SC2016
+          printf '\n```\ndocker pull ghcr.io/%s/dbox:%s\n```\n' "${GITHUB_REPOSITORY_OWNER,,}" "$VERSION" >> notes.md
+          gh release create "$GITHUB_REF_NAME" --title "DBox $VERSION" --notes-file notes.md --verify-tag

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { RunResult } from "../src/docker.ts";
 import { Jobs } from "../src/jobs.ts";
-import { renderPage, renderSettingsPage } from "../src/page.ts";
+import { renderPage, renderSettingsPage } from "../src/ui/index.ts";
 import { ACTION_HEADER } from "../src/protocol.ts";
 import type { Entry } from "../src/registry.ts";
 import { route, viewerOf, type Actions, type Deps } from "../src/server.ts";
@@ -36,6 +36,8 @@ function entry(
       project: "dbox-budget-prod",
       source: "/home/serve/dbox/budget",
       autoDeploy: false,
+      publicDomain: null,
+      services: [],
       ...over,
     },
     state,
@@ -224,6 +226,196 @@ describe("lecture", () => {
   });
 });
 
+describe("supprimer une cible depuis le panneau Manifeste", () => {
+  function avecManifeste() {
+    const harness = avecActions([entry()]);
+    harness.fichiers.set(
+      "/home/serve/dbox/budget/dbox.toml",
+      'name = "budget"\n\n[targets.prod]\nmode = "deployed"\nport = 8080\n',
+    );
+    return harness;
+  }
+
+  it("propose la suppression derrière une confirmation, à côté de la configuration qu'elle détruit", async () => {
+    const harness = avecManifeste();
+    const response = await route("GET", "/api/apps/budget/prod/manifest", MOI, harness.deps);
+    assert.match(response.body, /hx-post="\/api\/apps\/budget\/prod\/remove"/);
+    assert.match(response.body, /hx-confirm="[^"]*budget\/prod[^"]*"/);
+  });
+
+  it("pose le bouton hors du formulaire, sinon le navigateur enregistrerait en même temps", async () => {
+    const harness = avecManifeste();
+    const response = await route("GET", "/api/apps/budget/prod/manifest", MOI, harness.deps);
+    const fin = response.body.indexOf("</form>");
+    assert.ok(fin !== -1, "le panneau doit contenir un formulaire");
+    assert.ok(
+      response.body.indexOf("/remove") > fin,
+      "« Supprimer » doit venir après la fermeture du formulaire",
+    );
+  });
+
+  it("reste hors de portée d'un lecteur seul : le panneau ne s'ouvre pas", async () => {
+    const html = renderPage([entry()], NOW, "moi", false);
+    assert.doesNotMatch(html, /data-action="manifest"/);
+    assert.doesNotMatch(html, /\/remove/);
+  });
+});
+
+describe("agir en un geste", () => {
+  it("redémarre par la commande qu'on taperait, sans passer par arrêter puis démarrer", async () => {
+    const harness = avecActions([entry()]);
+    const response = await route("POST", "/api/apps/budget/prod/restart", AGIR, harness.deps);
+    assert.equal(response.status, 200);
+    assert.deepEqual(harness.calls, [["restart"]]);
+  });
+
+  it("ne propose de redémarrer que ce qui tourne", () => {
+    assert.match(renderPage([entry({}, null, "en marche")], NOW, "moi", true), /hx-post="[^"]*\/restart"/);
+    assert.doesNotMatch(renderPage([entry({}, null, "arrêtée")], NOW, "moi", true), /hx-post="[^"]*\/restart"/);
+  });
+
+  it("offre d'appliquer tout de suite ce qui vient d'être enregistré", async () => {
+    const harness = avecActions([entry()]);
+    harness.fichiers.set(
+      "/home/serve/dbox/budget/dbox.toml",
+      'name = "budget"\n\n[targets.prod]\nmode = "deployed"\nport = 8080\n',
+    );
+    const response = await route(
+      "POST",
+      "/api/apps/budget/prod/manifest",
+      AGIR,
+      harness.deps,
+      undefined,
+      form({ port: 9090, health: "/" }),
+    );
+    assert.match(response.body, /prochain déploiement/);
+    assert.match(response.body, /Redéployer maintenant/);
+    assert.match(response.body, /hx-post="\/api\/apps\/budget\/prod\/up"/);
+  });
+
+  it("n'offre pas ce bouton quand l'enregistrement a échoué", async () => {
+    const harness = avecActions([entry()]);
+    harness.fichiers.set(
+      "/home/serve/dbox/budget/dbox.toml",
+      'name = "budget"\n\n[targets.prod]\nmode = "deployed"\nport = 8080\n',
+    );
+    const response = await route(
+      "POST",
+      "/api/apps/budget/prod/manifest",
+      AGIR,
+      harness.deps,
+      undefined,
+      form({ port: 0, health: "/" }),
+    );
+    assert.doesNotMatch(response.body, /Redéployer maintenant/);
+  });
+
+  it("nomme le conteneur fautif quand l'état est partiel", () => {
+    const partielle: Entry = {
+      ...entry({}, null, "partielle"),
+      containers: [
+        { name: "dbox-budget-prod-app-1", state: "running" },
+        { name: "dbox-budget-prod-db-1", state: "exited" },
+        { name: "dbox-budget-prod-tailscale-1", state: "running" },
+      ],
+    };
+    const html = renderPage([partielle], NOW, "moi", true);
+    assert.match(html, /class="souci">db : exited<\/div>/);
+    // Le préfixe du projet et le suffixe de réplique n'apprennent rien de plus
+    // que ce que la carte porte déjà.
+    assert.doesNotMatch(html, /dbox-budget-prod-db-1/);
+  });
+
+  it("ne dit rien sur une cible saine, même avec plusieurs conteneurs", () => {
+    const saine: Entry = {
+      ...entry({}, null, "en marche"),
+      containers: [
+        { name: "dbox-budget-prod-app-1", state: "running" },
+        { name: "dbox-budget-prod-db-1", state: "running" },
+      ],
+    };
+    assert.doesNotMatch(renderPage([saine], NOW, "moi", true), /class="souci"/);
+  });
+
+  it("laisse entier un nom de conteneur posé à la main", () => {
+    const partielle: Entry = {
+      ...entry({}, null, "redémarre"),
+      containers: [{ name: "ma-base-perso", state: "restarting" }],
+    };
+    assert.match(renderPage([partielle], NOW, "moi", true), /ma-base-perso : restarting/);
+  });
+});
+
+describe("panneau des fichiers générés", () => {
+  /** Le dossier d'une cible tel qu'il est vraiment : les fichiers montrables,
+   * et les deux qu'on ne doit jamais voir passer dans une réponse HTTP. */
+  function avecDossier(state: Entry["state"] = null) {
+    const harness = avecActions([entry({}, state)]);
+    const d = "/opt/dbox/apps/budget/prod";
+    harness.fichiers.set(`${d}/docker-compose.yml`, "services:\n  app:\n    image: budget:abc\n");
+    harness.fichiers.set(`${d}/serve.json`, `{ "TCP": {} }\n`);
+    harness.fichiers.set(`${d}/dbox.json`, `{ "app": "budget" }\n`);
+    harness.fichiers.set(`${d}/ts.env`, "TS_AUTHKEY=tskey-auth-SECRET\n");
+    return harness;
+  }
+
+  it("rend les trois fichiers que DBox a produits", async () => {
+    const harness = avecDossier();
+    const response = await route("GET", "/api/apps/budget/prod/fichiers", MOI, harness.deps);
+    assert.equal(response.status, 200);
+    assert.match(response.body, /<summary>docker-compose\.yml<\/summary>/);
+    assert.match(response.body, /<summary>serve\.json<\/summary>/);
+    assert.match(response.body, /<summary>dbox\.json<\/summary>/);
+    assert.match(response.body, /image: budget:abc/);
+  });
+
+  it("ne montre jamais ts.env, ni la clé qu'il porte", async () => {
+    const harness = avecDossier();
+    const response = await route("GET", "/api/apps/budget/prod/fichiers", MOI, harness.deps);
+    assert.doesNotMatch(response.body, /ts\.env/);
+    assert.doesNotMatch(response.body, /tskey-auth/);
+  });
+
+  it("ne montre pas .env non plus : il a son panneau, avec les valeurs masquées", async () => {
+    const harness = avecDossier();
+    const response = await route("GET", "/api/apps/budget/prod/fichiers", MOI, harness.deps);
+    // `.env` existe dans le dossier de test (posé par `avecActions`).
+    assert.doesNotMatch(response.body, /B=deux/);
+  });
+
+  it("échappe le contenu d'un fichier avant de l'insérer dans la page", async () => {
+    const harness = avecDossier();
+    harness.fichiers.set("/opt/dbox/apps/budget/prod/dbox.json", `{ "app": "<script>alert(1)</script>" }`);
+    const response = await route("GET", "/api/apps/budget/prod/fichiers", MOI, harness.deps);
+    assert.doesNotMatch(response.body, /<script>alert/);
+    assert.match(response.body, /&lt;script&gt;/);
+  });
+
+  it("dit d'où vient le code, et vers quoi un retour arrière ramènerait", async () => {
+    const harness = avecDossier({
+      tag: "abc123",
+      previousTag: "def456",
+      deployedAt: "2026-08-10T06:00:00.000Z",
+    });
+    const response = await route("GET", "/api/apps/budget/prod/fichiers", MOI, harness.deps);
+    assert.match(response.body, /<code>\/home\/serve\/dbox\/budget<\/code>/);
+    assert.match(response.body, /version précédente<\/span> <code>def456<\/code>/);
+  });
+
+  it("tait la version précédente quand il n'y en a pas", async () => {
+    const harness = avecDossier({ tag: "abc123", previousTag: null, deployedAt: "2026-08-10T06:00:00.000Z" });
+    const response = await route("GET", "/api/apps/budget/prod/fichiers", MOI, harness.deps);
+    assert.doesNotMatch(response.body, /version précédente/);
+  });
+
+  it("s'ouvre sans planter sur une cible jamais déployée", async () => {
+    const harness = avecActions([entry()]);
+    const response = await route("GET", "/api/apps/budget/prod/fichiers", MOI, harness.deps);
+    assert.equal(response.status, 200);
+    assert.match(response.body, /jamais été déployée/);
+  });
+});
+
 describe("actions", () => {
   it("arrête et démarre par la commande qu'on taperait à la main", async () => {
     for (const [action, verb] of [["stop", "stop"], ["start", "start"]]) {
@@ -271,6 +463,20 @@ describe("actions", () => {
     assert.equal(response.status, 200);
     assert.match(response.body, /redéploiement est en cours/);
     assert.equal(harness.removeCalls.length, 0);
+  });
+
+  it("refuse de démarrer, arrêter ou redémarrer une cible en cours de redéploiement", async () => {
+    const harness = avecActions([entry()]);
+    await route("POST", "/api/apps/budget/prod/up", AGIR, harness.deps);
+    const avant = harness.calls.length;
+
+    for (const action of ["start", "stop", "restart"]) {
+      const response = await route("POST", `/api/apps/budget/prod/${action}`, AGIR, harness.deps);
+      assert.equal(response.status, 200);
+      assert.match(response.body, /redéploiement est en cours/, action);
+    }
+    // Aucune commande docker compose n'est partie.
+    assert.equal(harness.calls.length, avant);
   });
 
   it("rend la main tout de suite sur un redéploiement, avec un fragment de sondage", async () => {
@@ -542,6 +748,66 @@ describe("ajouter une app", () => {
     assert.deepEqual(harness.addCalls, [["x", null, { mode: "workspace", port: 5178, command: "npm run dev" }]]);
   });
 
+  it("transmet l'image et le Dockerfile choisis pour un devcontainer", async () => {
+    const harness = avecActions([entry()]);
+    await route(
+      "POST",
+      "/api/apps",
+      AGIR,
+      harness.deps,
+      new URLSearchParams(),
+      form({
+        url: "x",
+        mode: "devcontainer",
+        port: 8000,
+        command: "uvicorn app:app --host 0.0.0.0",
+        image: "python:3.13-slim",
+        dockerfile: "Dockerfile.dev",
+      }),
+    );
+    assert.deepEqual(harness.addCalls, [
+      [
+        "x",
+        null,
+        {
+          mode: "devcontainer",
+          port: 8000,
+          command: "uvicorn app:app --host 0.0.0.0",
+          image: "python:3.13-slim",
+          dockerfile: "Dockerfile.dev",
+        },
+      ],
+    ]);
+  });
+
+  it("laisse image et dockerfile absents quand les champs sont vides", async () => {
+    const harness = avecActions([entry()]);
+    await route(
+      "POST",
+      "/api/apps",
+      AGIR,
+      harness.deps,
+      new URLSearchParams(),
+      form({ url: "x", mode: "devcontainer", port: 8000, command: "x", image: "", dockerfile: "" }),
+    );
+    assert.deepEqual(harness.addCalls, [["x", null, { mode: "devcontainer", port: 8000, command: "x" }]]);
+  });
+
+  it("ignore image et dockerfile hors du mode devcontainer", async () => {
+    // Le manifeste les refuserait en workspace : les laisser passer écrirait
+    // un dbox.toml qu'on ne pourrait plus relire.
+    const harness = avecActions([entry()]);
+    await route(
+      "POST",
+      "/api/apps",
+      AGIR,
+      harness.deps,
+      new URLSearchParams(),
+      form({ url: "x", mode: "workspace", port: 5178, command: "x", image: "python:3.13-slim" }),
+    );
+    assert.deepEqual(harness.addCalls, [["x", null, { mode: "workspace", port: 5178, command: "x" }]]);
+  });
+
   it("refuse un mode inconnu", async () => {
     const harness = avecActions([entry()]);
     const response = await route(
@@ -669,6 +935,26 @@ describe("configuration d'une cible", () => {
     assert.equal(harness.fichiers.get("/opt/dbox/apps/budget/prod/.env"), "A=9\n");
     // L'image n'a pas changé : recréer suffit, et surtout pas reconstruire.
     assert.deepEqual(harness.calls, [["up", "-d", "--no-build"]]);
+  });
+
+  it("refuse d'enregistrer le .env d'une cible en cours de redéploiement", async () => {
+    const harness = avecActions([entry()]);
+    await route("POST", "/api/apps/budget/prod/up", AGIR, harness.deps);
+    const avant = harness.calls.length;
+
+    const response = await route(
+      "POST",
+      "/api/apps/budget/prod/env",
+      AGIR,
+      harness.deps,
+      new URLSearchParams(),
+      form({ key: "A", value: "9" }),
+    );
+
+    assert.match(response.body, /redéploiement est en cours/);
+    // Ni fichier écrit, ni `up -d` glissé au milieu du redéploiement.
+    assert.equal(harness.fichiers.get("/opt/dbox/apps/budget/prod/.env"), "A=1\nB=deux\n");
+    assert.equal(harness.calls.length, avant);
   });
 
   it("n'allume pas une cible à l'arrêt pour appliquer un réglage", async () => {
@@ -811,6 +1097,75 @@ describe("réglages d'une cible (dbox.toml)", () => {
     assert.equal(harness.fichiers.get("/home/serve/dbox/budget/dbox.toml"), DEPLOYED);
   });
 
+  it("transmet les services compagnons que le formulaire porte désormais", async () => {
+    // Ils survivaient jadis parce que le formulaire les ignorait ; ils
+    // survivent maintenant parce qu'il les renvoie. La garantie a changé de
+    // nature, pas de résultat.
+    const harness = avecManifeste(
+      `name = "budget"\n[targets.prod]\nmode = "deployed"\nport = 8080\n` +
+        `[targets.prod.services.db]\nimage = "postgres:16-alpine"\ndata = "/var/lib/postgresql/data"\n`,
+    );
+    const corps = new URLSearchParams({ port: "9090", health: "/", data: "/app/data" });
+    corps.append("serviceNom", "db");
+    corps.append("serviceImage", "postgres:16-alpine");
+    corps.append("serviceData", "/var/lib/postgresql/data");
+
+    await route("POST", "/api/apps/budget/prod/manifest", AGIR, harness.deps, new URLSearchParams(), corps.toString());
+
+    const written = harness.fichiers.get("/home/serve/dbox/budget/dbox.toml")!;
+    assert.match(written, /port = 9090/);
+    assert.match(written, /data = "\/app\/data"/);
+    assert.match(written, /\[targets\.prod\.services\.db\]/);
+    assert.match(written, /image = "postgres:16-alpine"/);
+  });
+
+  it("retire un compagnon quand sa ligne disparaît du formulaire", async () => {
+    const harness = avecManifeste(
+      `name = "budget"\n[targets.prod]\nmode = "deployed"\nport = 8080\n` +
+        `[targets.prod.services.db]\nimage = "postgres:16-alpine"\n`,
+    );
+    await route(
+      "POST", "/api/apps/budget/prod/manifest", AGIR, harness.deps,
+      new URLSearchParams(), form({ port: 8080, health: "/" }),
+    );
+    assert.doesNotMatch(harness.fichiers.get("/home/serve/dbox/budget/dbox.toml")!, /services/);
+  });
+
+  it("refuse une ligne de service à moitié remplie", async () => {
+    const harness = avecManifeste(DEPLOYED);
+    const corps = new URLSearchParams({ port: "8080", health: "/" });
+    corps.append("serviceNom", "db");
+    corps.append("serviceImage", "");
+    corps.append("serviceData", "");
+
+    const response = await route("POST", "/api/apps/budget/prod/manifest", AGIR, harness.deps, new URLSearchParams(), corps.toString());
+    assert.match(response.body, /au moins un nom et une image/);
+    assert.equal(harness.fichiers.get("/home/serve/dbox/budget/dbox.toml"), DEPLOYED);
+  });
+
+  it("refuse deux compagnons de même nom, que Docker ne garderait qu'une fois", async () => {
+    const harness = avecManifeste(DEPLOYED);
+    const corps = new URLSearchParams({ port: "8080", health: "/" });
+    for (const _ of [0, 1]) {
+      corps.append("serviceNom", "db");
+      corps.append("serviceImage", "postgres:16-alpine");
+      corps.append("serviceData", "");
+    }
+    const response = await route("POST", "/api/apps/budget/prod/manifest", AGIR, harness.deps, new URLSearchParams(), corps.toString());
+    assert.match(response.body, /deux services nommés/);
+  });
+
+  it("renvoie le message du manifeste sur une image invalide, sans valider deux fois", async () => {
+    const harness = avecManifeste(DEPLOYED);
+    const corps = new URLSearchParams({ port: "8080", health: "/" });
+    corps.append("serviceNom", "MaBase");
+    corps.append("serviceImage", "postgres:16");
+    corps.append("serviceData", "");
+
+    const response = await route("POST", "/api/apps/budget/prod/manifest", AGIR, harness.deps, new URLSearchParams(), corps.toString());
+    assert.match(response.body, /n'est pas un nom de service valide/);
+  });
+
   it("ne touche pas aux autres cibles du même fichier", async () => {
     const harness = avecManifeste(
       `name = "budget"\n[targets.dev]\nmode = "workspace"\ncommand = "npm run dev"\nport = 5178\n[targets.prod]\nmode = "deployed"\nport = 8080\n`,
@@ -826,6 +1181,63 @@ describe("réglages d'une cible (dbox.toml)", () => {
     const written = harness.fichiers.get("/home/serve/dbox/budget/dbox.toml")!;
     assert.match(written, /\[targets\.dev\]/);
     assert.match(written, /command = "npm run dev"/);
+  });
+
+  it("propose un champ de domaine public, en texte libre", async () => {
+    const harness = avecManifeste(DEPLOYED);
+    const response = await route("GET", "/api/apps/budget/prod/manifest", MOI, harness.deps);
+    assert.match(response.body, /name="publicDomain" value=""/);
+  });
+
+  it("n'affiche pas le champ en mode workspace : rien à router sans conteneur", async () => {
+    const harness = avecManifeste(
+      `name = "budget"\n[targets.dev]\nmode = "workspace"\ncommand = "npm run dev"\nport = 5178\n`,
+    );
+    harness.deps.scan = async () => [entry({ target: "dev", mode: "workspace" })];
+    const response = await route("GET", "/api/apps/budget/dev/manifest", MOI, harness.deps);
+    assert.doesNotMatch(response.body, /publicDomain/);
+  });
+
+  it("enregistre le domaine saisi", async () => {
+    const harness = avecManifeste(DEPLOYED);
+    await route(
+      "POST",
+      "/api/apps/budget/prod/manifest",
+      AGIR,
+      harness.deps,
+      new URLSearchParams(),
+      form({ port: 8080, health: "/", publicDomain: "budget.exemple.fr" }),
+    );
+    assert.match(harness.fichiers.get("/home/serve/dbox/budget/dbox.toml")!, /public_domain = "budget\.exemple\.fr"/);
+  });
+
+  it("repasse la cible en privé quand le champ est vidé", async () => {
+    const harness = avecManifeste(
+      `name = "budget"\n[targets.prod]\nmode = "deployed"\nport = 8080\npublic_domain = "budget.exemple.fr"\n`,
+    );
+    await route(
+      "POST",
+      "/api/apps/budget/prod/manifest",
+      AGIR,
+      harness.deps,
+      new URLSearchParams(),
+      form({ port: 8080, health: "/", publicDomain: "" }),
+    );
+    assert.doesNotMatch(harness.fichiers.get("/home/serve/dbox/budget/dbox.toml")!, /public_domain/);
+  });
+
+  it("refuse un domaine mal formé avec le même message qu'un dbox.toml à la main", async () => {
+    const harness = avecManifeste(DEPLOYED);
+    const response = await route(
+      "POST",
+      "/api/apps/budget/prod/manifest",
+      AGIR,
+      harness.deps,
+      new URLSearchParams(),
+      form({ port: 8080, health: "/", publicDomain: "https://budget.exemple.fr" }),
+    );
+    assert.match(response.body, /« public_domain » doit être un nom de domaine/);
+    assert.equal(harness.fichiers.get("/home/serve/dbox/budget/dbox.toml"), DEPLOYED);
   });
 });
 
@@ -862,16 +1274,53 @@ describe("page", () => {
     assert.doesNotMatch(renderPage([entry()], NOW, "moi", false), /href="\/settings"/);
   });
 
-  it("propose un bouton pour éditer le manifeste de la cible", () => {
-    assert.match(renderPage([entry()], NOW, "moi", true), /hx-get="\/api\/apps\/budget\/prod\/manifest"/);
-    assert.doesNotMatch(renderPage([entry()], NOW, "moi", false), /hx-get="\/api\/apps\/budget\/prod\/manifest"/);
+  it("signale qu'une cible est exposée sur internet, et donne les deux URL", () => {
+    // C'est l'information la plus lourde de conséquences qu'une carte porte :
+    // sans elle, une app publique ressemble trait pour trait à une app privée.
+    const html = renderPage([entry({ publicDomain: "budget.exemple.fr" })], NOW, "moi", true);
+    assert.match(html, /class="etat publique"/);
+    assert.match(html, /https:\/\/budget\.exemple\.fr/);
+    // l'URL privée reste là : l'exposition est additive
+    assert.match(html, /https:\/\/budget\.mon-tailnet\.ts\.net/);
   });
 
-  it("propose de supprimer la cible derrière une confirmation, jamais en lecture seule", () => {
+  it("ne dit rien de public pour une cible privée", () => {
     const html = renderPage([entry()], NOW, "moi", true);
-    assert.match(html, /hx-post="\/api\/apps\/budget\/prod\/remove"/);
-    assert.match(html, /hx-confirm="[^"]*budget\/prod[^"]*"/);
-    assert.doesNotMatch(renderPage([entry()], NOW, "moi", false), /hx-post="\/api\/apps\/budget\/prod\/remove"/);
+    assert.doesNotMatch(html, /class="etat publique"/);
+  });
+
+  it("liste les services compagnons : une cible avec base ne ressemble pas à une sans", () => {
+    const html = renderPage([entry({ services: ["db", "cache"] })], NOW, "moi", true);
+    assert.match(html, /\+ db, cache/);
+  });
+
+  it("signale le redéploiement automatique", () => {
+    assert.match(renderPage([entry({ autoDeploy: true })], NOW, "moi", true), /· auto/);
+    assert.doesNotMatch(renderPage([entry()], NOW, "moi", true), /· auto/);
+  });
+
+  it("échappe ce qui vient du disque dans les nouveaux champs", () => {
+    const html = renderPage(
+      [entry({ services: ["<script>x</script>"] })],
+      NOW, "moi", true,
+    );
+    assert.doesNotMatch(html, /<script>x/);
+  });
+
+  it("propose un bouton pour éditer le manifeste de la cible", () => {
+    // Des bascules Alpine, pas des `hx-get` : refermer ne doit rien demander
+    // au serveur.
+    const html = renderPage([entry()], NOW, "moi", true);
+    assert.match(html, /data-action="fichiers" data-url="\/api\/apps\/budget\/prod\/fichiers"/);
+    assert.match(html, /data-action="manifest" data-url="\/api\/apps\/budget\/prod\/manifest"/);
+    assert.match(html, /@click="bascule\(\$el\.dataset\.action, \$el\.dataset\.url\)"/);
+    assert.doesNotMatch(renderPage([entry()], NOW, "moi", false), /data-action="manifest"/);
+  });
+
+  it("ne laisse jamais « Supprimer » sur la surface toujours visible", () => {
+    // Déplacé dans le panneau Manifeste — dix cartes, c'était dix boutons
+    // irréversibles à un clic. Le test du panneau garde sa présence.
+    assert.doesNotMatch(renderPage([entry()], NOW, "moi", true), /hx-post="\/api\/apps\/budget\/prod\/remove"/);
   });
 
   it("le dit quand une cible n'a jamais été déployée", () => {
@@ -906,9 +1355,14 @@ describe("page", () => {
     assert.ok(ajoutIndex !== -1 && ajoutIndex < cartesIndex, "le formulaire d'ajout précède #cartes");
   });
 
-  it("le sondage suspend le rafraîchissement si un panneau .conf est ouvert dans la liste", () => {
+  it("le sondage se suspend pour tout ce qu'il détruirait sans pouvoir le reconstruire", () => {
+    // Le sondage remplace toutes les cartes : sans ces gardes, une édition en
+    // cours, un panneau qu'on lit, un journal suivi ou un redéploiement dont on
+    // regarde la progression disparaissaient au bout de 15 s.
     const html = renderPage([entry()], NOW, "moi", true);
-    assert.match(html, /document\.querySelector\('#cartes \.conf'\)/);
+    for (const garde of ["#cartes .conf", "#cartes .fichiers", "#cartes .journal", "#cartes .job"]) {
+      assert.ok(html.includes(garde), `garde manquante : ${garde}`);
+    }
   });
 
   it("un lecteur seul n'a pas de sondage automatique", () => {
@@ -957,6 +1411,82 @@ describe("page", () => {
   });
 });
 
+describe("retrouver une cible dans la liste", () => {
+  /** Plusieurs apps, dont une à deux cibles — c'est ce que le groupement
+   * change — et assez nombreuses pour que le champ de filtre apparaisse. */
+  const dix = [
+    entry({ app: "atef", target: "prod" }),
+    entry({ app: "budget", target: "dev", hostname: "budget-dev" }),
+    entry({ app: "budget", target: "prod", publicDomain: "budget.appvc.fr" }),
+    entry({ app: "git", target: "prod" }),
+    entry({ app: "temoin", target: "prod" }),
+    entry({ app: "vault", target: "prod" }),
+  ];
+
+  it("pose le champ de filtre en dehors de #cartes, pour qu'il survive au sondage", () => {
+    const html = renderPage(dix, NOW, "moi", true);
+    const avant = html.indexOf(`x-data="{ q: '' }"`);
+    const cartes = html.indexOf(`id="cartes"`);
+    assert.ok(avant !== -1 && avant < cartes, "la portée Alpine doit englober #cartes, pas y être");
+    assert.match(html, /x-model(\.\w+)?="q"/);
+  });
+
+  it("cherche sur le nom, la cible et le domaine public — jamais dans l'expression Alpine", () => {
+    const html = renderPage(dix, NOW, "moi", true);
+    assert.match(html, /data-cherche="budget prod budget\.appvc\.fr en marche public"/);
+    assert.match(html, /data-cherche="budget dev  en marche"/);
+    // L'expression est du JavaScript : le texte cherché passe par un attribut,
+    // sinon une apostrophe dans un nom y ouvrirait une injection.
+    assert.match(html, /x-show="!q \|\| \$el\.dataset\.cherche\.includes\(q\.toLowerCase\(\)\)"/);
+    assert.doesNotMatch(html, /x-show="[^"]*budget\.appvc\.fr/);
+  });
+
+  it("rend le bloc d'app filtrable lui aussi, sinon le filtre laisse des trous", () => {
+    const html = renderPage(dix, NOW, "moi", true);
+    // Le bloc porte la concaténation de ses cibles : il reste visible dès
+    // qu'une seule correspond, et disparaît de la grille sinon.
+    assert.match(
+      html,
+      /<ul class="app app-multiple" data-cherche="budget dev  en marche budget prod budget\.appvc\.fr en marche public" x-show=/,
+    );
+    assert.match(html, /<ul class="app" data-cherche="atef prod  en marche" x-show=/);
+  });
+
+  it("groupe les cibles d'une même app dans un seul bloc", () => {
+    const html = renderPage(dix, NOW, "moi", true);
+    assert.equal((html.match(/<ul class="app/g) ?? []).length, 5); // 6 cibles, 5 apps
+    // Les deux cibles de budget dans le même <ul>, atef seul dans le sien.
+    const bloc = html.slice(html.indexOf(`data-cherche="budget dev`));
+    const fin = bloc.indexOf("</ul>");
+    assert.equal((bloc.slice(0, fin).match(/<li id="carte-/g) ?? []).length, 2);
+  });
+
+  it("résume l'état de la machine avant les cartes", () => {
+    const html = renderPage(
+      [
+        entry({ app: "a" }, null, "en marche"),
+        entry({ app: "b", publicDomain: "b.exemple.fr" }, null, "arrêtée"),
+        entry({ app: "c" }, null, "partielle"),
+      ],
+      NOW,
+      "moi",
+      true,
+    );
+    assert.match(html, /3 cibles<\/button>/);
+    assert.match(html, /1 en marche<\/button>/);
+    assert.match(html, /<strong>1 en souffrance<\/strong><\/button>/);
+    assert.match(html, /1 publique<\/button>/);
+  });
+
+  it("tait ce qui vaut zéro — pas de « 0 publique » ni de « 0 en souffrance »", () => {
+    const html = renderPage([entry()], NOW, "moi", true);
+    assert.match(html, /1 cible<\/button>/);
+    assert.match(html, /1 en marche<\/button>/);
+    assert.doesNotMatch(html, /souffrance/);
+    assert.doesNotMatch(html, /0 publique/);
+  });
+});
+
 describe("page des réglages", () => {
   it("n'affiche rien sur l'accès git sans information", () => {
     const html = renderSettingsPage("moi", null, null);
@@ -992,6 +1522,41 @@ describe("page des réglages", () => {
   it("un lien ramène à la liste des apps", () => {
     assert.match(renderSettingsPage("moi"), /href="\/"/);
   });
+
+  it("n'affiche rien sur le mode public sans réglage machine", () => {
+    assert.doesNotMatch(renderSettingsPage("moi"), /Mode public/);
+  });
+
+  it("affiche le réseau et le resolver quand le mode public est configuré", () => {
+    const html = renderSettingsPage("moi", null, null, [], false, null, null, null, NOW, {
+      network: "traefik-net",
+      certResolver: "letsencrypt",
+    });
+    assert.match(html, /Mode public/);
+    assert.match(html, /traefik-net/);
+    assert.match(html, /letsencrypt/);
+  });
+
+  it("n'affiche pas de version quand l'image n'en porte pas", () => {
+    assert.doesNotMatch(renderSettingsPage("moi"), /Version du daemon/);
+  });
+
+  it("affiche la version gravée dans l'image", () => {
+    const html = renderSettingsPage("moi", null, null, [], false, null, null, null, NOW, null, "1e4e15071cb0");
+    assert.match(html, /Version du daemon/);
+    assert.match(html, /1e4e15071cb0/);
+    assert.doesNotMatch(html, /arbre modifié/);
+  });
+
+  it("signale une image construite depuis un arbre modifié", () => {
+    const html = renderSettingsPage("moi", null, null, [], false, null, null, null, NOW, null, "1e4e15071cb0-sale");
+    assert.match(html, /arbre modifié/);
+  });
+
+  it("échappe la version, comme tout ce qui vient de l'extérieur", () => {
+    const html = renderSettingsPage("moi", null, null, [], false, null, null, null, NOW, null, "<script>x</script>");
+    assert.doesNotMatch(html, /<script>x/);
+  });
 });
 
 describe("route /settings", () => {
@@ -1007,6 +1572,22 @@ describe("route /settings", () => {
     const harness = avecActions([entry()]);
     const response = await route("GET", "/settings", {}, harness.deps);
     assert.equal(response.status, 401);
+  });
+
+  it("le panneau du mode public vient de deps.traefik", async () => {
+    const harness = avecActions([entry()]);
+    harness.deps.traefik = { network: "traefik-net", certResolver: "letsencrypt" };
+    const response = await route("GET", "/settings", MOI, harness.deps);
+    assert.match(response.body, /Mode public/);
+    assert.match(response.body, /traefik-net/);
+  });
+
+  it("la version vient de deps.version", async () => {
+    const harness = avecActions([entry()]);
+    harness.deps.version = "abc123def456";
+    const response = await route("GET", "/settings", MOI, harness.deps);
+    assert.match(response.body, /Version du daemon/);
+    assert.match(response.body, /abc123def456/);
   });
 });
 
@@ -1386,4 +1967,274 @@ describe("avertissement d'expiration de la clé", () => {
     const page = await route("GET", "/", MOI, harness.deps);
     assert.doesNotMatch(page.body, /autogroup:admin/); // uniquement sur /settings
   });
+});
+
+describe("état de la machine sur /settings", () => {
+  const NOW_S = Date.parse("2026-08-16T13:00:00.000Z");
+  const VU = "2026-08-16T12:00:00.000Z";
+
+  it("rassemble les constats sous un titre, au lieu de les laisser flotter", () => {
+    const html = renderSettingsPage(
+      "moi", null, null, [], false, null,
+      { checkedAt: VU, tag: "tag:dbox", stale: [] },
+      { checkedAt: VU, tag: "tag:dbox", present: true, suggestedLine: null },
+      NOW_S,
+      { network: "traefik-net", certResolver: "letsencrypt" },
+      "abc1234",
+    );
+    const bloc = html.indexOf(`class="etat-machine"`);
+    assert.ok(bloc !== -1, "le bloc doit exister dès qu'il y a un constat");
+    assert.match(html, /<h2>État de la machine<\/h2>/);
+    // Les quatre constats sont dedans, pas éparpillés avant.
+    const dedans = html.slice(bloc);
+    for (const attendu of [/aucun abandonné/, /déclaré dans tagOwners/, /Mode public/, /Version du daemon/]) {
+      assert.match(dedans, attendu);
+    }
+  });
+
+  it("garde les avis au-dessus du bloc : ils appellent un geste, pas une lecture", () => {
+    const html = renderSettingsPage(
+      "moi", null, null, [], false, null,
+      {
+        checkedAt: VU,
+        tag: "tag:dbox",
+        stale: [{ hostname: "vieille-app", id: "3", lastSeen: "2026-07-01T00:00:00Z" }],
+      },
+      null,
+      NOW_S,
+      null,
+      "abc1234",
+    );
+    const avis = html.indexOf(`class="avis avis-doux"`);
+    const bloc = html.indexOf(`class="etat-machine"`);
+    assert.ok(avis !== -1 && bloc !== -1);
+    assert.ok(avis < bloc, "un avis doit précéder le bloc de constats");
+  });
+
+  it("ne pose pas de cadre vide quand il n'y a rien à constater", () => {
+    const html = renderSettingsPage("moi");
+    // `etat-machine` tout court apparaîtrait dans la feuille de style ; c'est
+    // l'élément qu'on cherche, pas la règle CSS qui le décrit.
+    assert.doesNotMatch(html, /class="etat-machine"/);
+    assert.doesNotMatch(html, /État de la machine/);
+  });
+});
+
+describe("une page qui se referme", () => {
+  it("rend la liste utilisable sans Alpine, en lecture seule", () => {
+    // Le piège : `x-cloak` vaut `display:none !important` tant qu'Alpine ne
+    // l'a pas retiré — et une page sans actions ne charge ni htmx ni Alpine.
+    // Poser le filtre sans cette garde masquait la liste entière.
+    // `[x-cloak]` figure aussi dans la feuille de style : c'est l'attribut
+    // posé sur un élément qu'on traque, pas la règle CSS qui le décrit.
+    const html = renderPage([entry()], NOW, null, false);
+    assert.doesNotMatch(html, / x-cloak>/);
+    assert.doesNotMatch(html, /x-show=/);
+    assert.doesNotMatch(html, /x-data=/);
+    assert.doesNotMatch(html, /class="filtre"/);
+    assert.match(html, /budget/);
+  });
+
+  it("garde le filtre complet dès que les actions sont là", () => {
+    const beaucoup = ["a", "b", "c", "d", "e"].map((app) => entry({ app }));
+    const html = renderPage(beaucoup, NOW, "moi", true);
+    assert.match(html, /class="filtre"/);
+    assert.match(html, / x-cloak>/);
+  });
+
+  it("n'affiche pas le champ de filtre sous le seuil : la liste tient déjà dans l'écran", () => {
+    const quatre = ["a", "b", "c", "d"].map((app) => entry({ app }));
+    assert.doesNotMatch(renderPage(quatre, NOW, "moi", true), /class="filtre"/);
+    assert.match(renderPage([...quatre, entry({ app: "e" })], NOW, "moi", true), /class="filtre"/);
+    // Le résumé, lui, reste toujours là — il ne coûte qu'une ligne.
+    assert.match(renderPage(quatre, NOW, "moi", true), /class="resume"/);
+  });
+
+  it("marque le panneau ouvert sur son bouton, pour savoir où recliquer", () => {
+    const html = renderPage([entry()], NOW, "moi", true);
+    assert.match(html, /:class="\{ actif: panneau === \$el\.dataset\.action \}"/);
+    assert.match(html, /x-data="dbCarte\('budget-prod'\)"/);
+  });
+
+  it("replie le formulaire d'ajout quand il y a déjà des cibles à regarder", () => {
+    assert.match(renderPage([entry()], NOW, "moi", true), /x-data="\{ ouvert: false \}"/);
+    assert.match(renderPage([entry()], NOW, "moi", true), /Ajouter une app/);
+  });
+
+  it("l'ouvre d'office sur une machine encore vide : c'est le seul geste possible", () => {
+    assert.match(renderPage([], NOW, "moi", true), /x-data="\{ ouvert: true \}"/);
+  });
+
+  it("les compteurs du résumé posent le filtre, et sont inertes sans Alpine", () => {
+    const actif = renderPage([entry({ publicDomain: "b.exemple.fr" })], NOW, "moi", true);
+    assert.match(actif, /@click="q = q === 'public' \? '' : 'public'"/);
+    // Le premier compteur remet tout à zéro plutôt que de filtrer sur rien.
+    assert.match(actif, /@click="q = q === '' \? '' : ''"/);
+
+    const lecture = renderPage([entry({ publicDomain: "b.exemple.fr" })], NOW, null, false);
+    assert.doesNotMatch(lecture, /@click/);
+    assert.match(lecture, /class="compteur-inerte"/);
+  });
+
+  it("« souci » atteint les deux états en souffrance, que rien d'autre ne réunit", () => {
+    const html = renderPage(
+      [entry({ app: "a" }, null, "partielle"), entry({ app: "b" }, null, "redémarre")],
+      NOW,
+      "moi",
+      true,
+    );
+    assert.equal((html.match(/data-cherche="[^"]*souci"/g) ?? []).length, 4); // 2 cartes + 2 blocs
+    assert.match(html, /@click="q = q === 'souci' \? '' : 'souci'"/);
+  });
+});
+
+describe("journal suivi en direct", () => {
+  it("se repose lui-même, sur la même cible et le même nombre de lignes", async () => {
+    const harness = avecActions([entry()]);
+    const response = await route(
+      "GET",
+      "/api/apps/budget/prod/logs",
+      MOI,
+      harness.deps,
+      new URLSearchParams("lines=50"),
+    );
+    // Le nombre de lignes ne vit plus dans l'URL : il voyage avec le menu,
+    // inclus à chaque passage — et la valeur en cours y figure, même hors liste.
+    assert.match(response.body, /hx-get="\/api\/apps\/budget\/prod\/logs"/);
+    assert.match(response.body, /hx-include="#journal-budget-prod \.journal-reglages"/);
+    assert.match(response.body, /<option value="50" selected>50 lignes<\/option>/);
+    assert.match(response.body, /hx-trigger="every 3s \[/);
+    assert.match(response.body, /hx-swap="outerHTML"/);
+    assert.match(response.body, /<pre>journal ligne 1\n?<\/pre>/);
+  });
+
+  it("ne sonde pas un onglet en arrière-plan, ni un journal mis en pause", async () => {
+    const harness = avecActions([entry()]);
+    const response = await route("GET", "/api/apps/budget/prod/logs", MOI, harness.deps);
+    assert.match(response.body, /!document\.hidden/);
+    assert.match(response.body, /journal-budget-prod'\)\.classList\.contains\('pause'\)/);
+  });
+
+  it("recolle le défilement au bas : les lignes neuves arrivent en dernier", async () => {
+    const harness = avecActions([entry()]);
+    const response = await route("GET", "/api/apps/budget/prod/logs", MOI, harness.deps);
+    assert.match(response.body, /#journal-budget-prod pre'\);[^<]*scrollTop = p\.scrollHeight/);
+    // Le script vient après le <pre>, sinon il ne trouverait rien à recoller.
+    assert.ok(response.body.indexOf("scrollHeight") > response.body.indexOf("</pre>"));
+  });
+
+  it("se referme en vidant le conteneur, jamais en retirant le bloc qui se remplace", async () => {
+    // Le bloc est remplacé toutes les 3 s : celui qu'on a sous le doigt peut
+    // déjà être détaché au moment du clic, et le retirer ne ferait rien.
+    const harness = avecActions([entry()]);
+    const response = await route("GET", "/api/apps/budget/prod/logs", MOI, harness.deps);
+    assert.match(response.body, /getElementById\('sortie-budget-prod'\)\.innerHTML = ''/);
+    assert.doesNotMatch(response.body, /closest\('\.journal'\)\.remove/);
+  });
+
+  it("agrandit les cibles tactiles : 25 px de haut se rataient au doigt", () => {
+    const html = renderPage([entry()], NOW, "moi", true);
+    assert.match(html, /@media \(pointer: coarse\)/);
+    assert.match(html, /min-height:2\.75rem/);
+  });
+
+  it("échappe toujours le contenu, malgré la nouvelle enveloppe", async () => {
+    const harness = avecActions([entry()], 0);
+    harness.deps.actions!.compose = async () => ({ code: 0, stdout: "<img onerror=alert(1)>", stderr: "" });
+    const response = await route("GET", "/api/apps/budget/prod/logs", MOI, harness.deps);
+    assert.doesNotMatch(response.body, /<img onerror/);
+    assert.match(response.body, /&lt;img onerror/);
+  });
+});
+
+describe("ce que le sondage de la liste ne doit pas détruire", () => {
+  it("le journal porte la classe qui le protège du remplacement des cartes", async () => {
+    const harness = avecActions([entry()]);
+    const response = await route("GET", "/api/apps/budget/prod/logs", MOI, harness.deps);
+    assert.match(response.body, /class="journal"/);
+  });
+
+  it("le panneau des fichiers aussi", async () => {
+    const harness = avecActions([entry()]);
+    const response = await route("GET", "/api/apps/budget/prod/fichiers", MOI, harness.deps);
+    assert.match(response.body, /class="fichiers"/);
+  });
+
+  it("le suivi d'un redéploiement en cours aussi — sinon on perd la progression", async () => {
+    const harness = avecActions([entry()]);
+    const lance = await route("POST", "/api/apps/budget/prod/up", AGIR, harness.deps);
+    assert.match(lance.body, /class="job"/);
+    assert.match(lance.body, /hx-trigger="every 1500ms"/);
+  });
+
+  it("mais pas un simple message de résultat : le figer suspendrait tout pour rien", async () => {
+    const harness = avecActions([entry({}, null, "arrêtée")]);
+    const response = await route("POST", "/api/apps/budget/prod/start", AGIR, harness.deps);
+    for (const garde of ["journal", "fichiers", `class="job"`, `class="conf"`]) {
+      assert.ok(!response.body.includes(garde), `un résultat ne doit pas porter ${garde}`);
+    }
+  });
+});
+
+describe("tenir dans un téléphone", () => {
+  it("laisse la colonne rétrécir sous sa borne basse, sinon 130 px sortent de l'écran", () => {
+    const html = renderPage([entry()], NOW, "moi", true);
+    // Sans le min(), auto-fit impose 34rem (544 px) même sur un écran de 430.
+    assert.match(html, /minmax\(min\(34rem, 100%\), 1fr\)/);
+    assert.doesNotMatch(html, /minmax\(34rem, 1fr\)/);
+  });
+
+  it("garde le lien entier même quand l'écran n'en montre qu'une partie", () => {
+    const html = renderPage([entry()], NOW, "moi", true);
+    // Le schéma est enveloppé, pas retiré : la CSS le masque sur écran étroit,
+    // mais href et texte copié restent une URL valide.
+    assert.match(html, /href="https:\/\/budget\.mon-tailnet\.ts\.net"/);
+    assert.match(html, /<span class="schema">https:\/\/<\/span>budget\.mon-tailnet\.ts\.net/);
+    assert.match(html, /a\.url \.schema \{ display:none; \}/);
+  });
+
+  it("rend la boîte de #cartes transparente sans le sortir du sondage", () => {
+    const html = renderPage([entry()], NOW, "moi", true);
+    assert.match(html, /\.liste-apps > #cartes \{ display:contents; \}/);
+    // Il reste bien la cible du sondage : c'est tout l'intérêt.
+    assert.match(html, /<div id="cartes" hx-get="\/api\/apps\/list"/);
+  });
+});
+
+describe("un nom piégé n'atteint jamais une expression JavaScript", () => {
+  /**
+   * Rend la page avec ce nom d'app, puis exécute chaque expression Alpine `@click`
+   * pour de vrai, avec des espions : aucune ne doit appeler autre chose que
+   * `bascule`. C'est la preuve qu'on cherchait à la revue — exécuter, pas lire.
+   */
+  function executeLesClics(app: string): string[] {
+    const html = renderPage([entry({ app, hostname: "x" })], NOW, "moi", true);
+    const appels: string[] = [];
+    const espion = new Proxy({}, { get: (_cible, nom) => (..._a: unknown[]) => { appels.push(String(nom)); return 0; } });
+    for (const [, expression] of html.matchAll(/@click="([^"]*)"/g)) {
+      const js = expression!.replaceAll("&quot;", '"').replaceAll("&#39;", "'").replaceAll("&amp;", "&");
+      // `$el.dataset` vaut ce que le navigateur lirait dans les attributs data-*.
+      const $el = { dataset: { action: "a", url: "u" }, closest: () => ({ classList: { toggle() {} }, remove() {} }) };
+      try {
+        new Function("bascule", "$el", "q", "document", "console", "alert", "fetch", js)(
+          (...a: unknown[]) => appels.push(`bascule(${a.length})`), $el, "", espion, espion,
+          () => appels.push("alert"), () => appels.push("fetch"),
+        );
+      } catch { /* une expression qui ne se compile pas n'exécute rien non plus */ }
+    }
+    return appels;
+  }
+
+  for (const piege of [
+    "x')-alert(1)-('",
+    "x');alert(1);('",
+    "x'+alert(1)+'",
+    "x\\u0027)-alert(1)-(\\u0027",
+  ]) {
+    it(`n'exécute rien de plus que bascule avec le nom ${JSON.stringify(piege)}`, () => {
+      const appels = executeLesClics(piege);
+      assert.ok(appels.length > 0, "les boutons doivent quand même fonctionner");
+      assert.ok(appels.every((a) => a.startsWith("bascule(")), `appels inattendus : ${appels.join(", ")}`);
+    });
+  }
 });

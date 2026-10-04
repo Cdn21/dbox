@@ -6,7 +6,7 @@
  * réseau du projet. Un test garde cet invariant.
  */
 
-import { hostnameFor, type Manifest, type Target } from "./manifest.ts";
+import { hostnameFor, type CompanionService, type Manifest, type Target } from "./manifest.ts";
 import type { YamlMap } from "./yaml.ts";
 
 export interface Context {
@@ -30,6 +30,27 @@ export interface Context {
   tailscaleImage: string;
   /** Dossier des sources sur la machine cible. */
   sourcePath: string;
+  /**
+   * Réglages du Traefik déjà en service sur cette machine, pour les cibles qui
+   * posent `public_domain`. `null` : mode public indisponible ici — une cible
+   * qui le demanderait est refusée, jamais routée vers un Traefik deviné.
+   */
+  traefik: TraefikConfig | null;
+}
+
+/**
+ * Ce qu'il faut savoir du Traefik de la machine pour lui confier une cible.
+ *
+ * DBox ne fournit ni n'installe ce Traefik, et ne modifie jamais sa
+ * configuration : il pose seulement, sur ses propres conteneurs, les labels que
+ * le provider Docker de Traefik découvre de lui-même. Un seul processus pouvant
+ * tenir le 80/443 d'une machine, c'est forcément celui qui y tourne déjà.
+ */
+export interface TraefikConfig {
+  /** Réseau Docker externe que ce Traefik écoute, déjà créé — jamais par DBox. */
+  network: string;
+  /** Resolver ACME déclaré dans sa config statique (`certificatesResolvers`). */
+  certResolver: string;
 }
 
 export const DEFAULT_CONTEXT: Omit<Context, "sourcePath" | "tailnet" | "uid" | "gid"> = {
@@ -37,7 +58,18 @@ export const DEFAULT_CONTEXT: Omit<Context, "sourcePath" | "tailnet" | "uid" | "
   tsTag: "tag:dbox",
   imageTag: "dev",
   tailscaleImage: "tailscale/tailscale:stable",
+  traefik: null,
 };
+
+/**
+ * Une image que DBox construit ne se télécharge jamais. Sans ça, Compose tente
+ * d'abord un `pull` de `dbox/<app>:<tag>` quand l'image manque en local (après
+ * un `docker image prune`, typiquement) — et sur Docker Hub, l'espace `dbox`
+ * appartient à un tiers : qu'il publie ce nom et ce tag, et son image tourne à
+ * la place de l'app, avec son `.env` et ses données. Vérifié le 4 octobre 2026.
+ * Avec `never`, une image absente se reconstruit, ou fait échouer `--no-build`.
+ */
+const PULL_JAMAIS = "never";
 
 export function projectName(app: string, target: string): string {
   return `dbox-${app}-${target}`;
@@ -57,6 +89,36 @@ export function sshUpstreamFor(target: Target): string | null {
   return `${host}:${target.sshPort}`;
 }
 
+/**
+ * Résout si cette cible est aussi exposée publiquement, et refuse tout de suite
+ * ce qui ne pourrait de toute façon jamais fonctionner — avant la moindre
+ * écriture. Point de refus **unique** : appelé par `composeFor` comme par
+ * `planFor`, donc impossible à contourner par un autre chemin d'appel.
+ *
+ * Rien à hériter d'un défaut de machine, contrairement à `tsTag` : une cible
+ * n'est publique que si son propre manifeste le dit.
+ */
+export function publicDomainFor(target: Target, ctx: Context, targetName: string): string | null {
+  // Le mode workspace ne porte pas le champ (voir `Published` dans manifest.ts).
+  const domain = target.mode === "workspace" ? null : target.publicDomain;
+  if (domain === null) return null;
+
+  if (ctx.traefik === null) {
+    throw new Error(
+      `cible « ${targetName} » : public_domain = "${domain}" mais aucun réglage traefik n'est configuré sur ` +
+        `cette machine — pose traefik_network et traefik_cert_resolver (config.toml ou --traefik-network / ` +
+        `--traefik-cert-resolver)`,
+    );
+  }
+  if (target.sshPort !== null) {
+    throw new Error(
+      `cible « ${targetName} » : ssh_port n'est pas pris en charge avec public_domain pour l'instant ` +
+        `(Traefik route le TCP par SNI, ce que le forward brut du sidecar ne fait pas) — retire l'un des deux`,
+    );
+  }
+  return domain;
+}
+
 export function composeFor(manifest: Manifest, targetName: string, ctx: Context): YamlMap {
   const target = manifest.targets[targetName];
   if (target === undefined) throw new Error(`cible « ${targetName} » inconnue`);
@@ -66,22 +128,41 @@ export function composeFor(manifest: Manifest, targetName: string, ctx: Context)
   const network = `${project}_internal`;
   const user = `${ctx.uid}:${ctx.gid}`;
 
+  const publicDomain = publicDomainFor(target, ctx, targetName);
+
+  // Le mode workspace ne porte pas de compagnons (voir `Companioned`).
+  const compagnons = target.mode === "workspace" ? {} : target.services;
+  const noms = Object.keys(compagnons);
+
   const services: YamlMap = {};
-  const app = appService(manifest.name, target, ctx, user);
+  const app = appService(manifest.name, target, ctx, user, project, publicDomain, noms);
   if (app !== undefined) services["app"] = app;
+  for (const [nom, compagnon] of Object.entries(compagnons)) {
+    services[nom] = companionService(nom, compagnon);
+  }
+  // Le sidecar ne change jamais quand la cible devient publique : l'exposition
+  // est additive, l'accès privé par le tailnet reste là même si le public casse.
   services["tailscale"] = tailscaleService(hostname, target, ctx, app !== undefined);
 
   const volumes: YamlMap = { "ts-state": {} };
   // Volume **nommé** et non anonyme : un volume anonyme disparaît au premier
   // `down -v` ou `--renew-anon-volumes`, ce qui emporterait la base de l'app.
   if (target.mode !== "workspace" && target.data !== null) volumes["data"] = {};
+  // Un volume par compagnon qui stocke, nommé d'après lui — jamais `data`, qui
+  // appartient à l'app, ni `ts-state`, qui appartient au sidecar.
+  for (const [nom, compagnon] of Object.entries(compagnons)) {
+    if (compagnon.data !== null) volumes[`${nom}-data`] = {};
+  }
 
-  return {
-    name: project,
-    services,
-    networks: { internal: { name: network } },
-    volumes,
-  };
+  const networks: YamlMap = { internal: { name: network } };
+  if (publicDomain !== null) {
+    // `external: true` est indispensable : sans lui, Compose créerait un
+    // réseau à lui, préfixé par le nom du projet — que le vrai Traefik
+    // n'écoute jamais. L'app serait sur le tailnet, invisible du public.
+    networks[ctx.traefik!.network] = { external: true, name: ctx.traefik!.network };
+  }
+
+  return { name: project, services, networks, volumes };
 }
 
 function appService(
@@ -89,6 +170,9 @@ function appService(
   target: Target,
   ctx: Context,
   user: string,
+  project: string,
+  publicDomain: string | null,
+  compagnons: string[],
 ): YamlMap | undefined {
   // En mode `workspace`, la commande tourne sur l'hôte : rien à conteneuriser.
   if (target.mode === "workspace") return undefined;
@@ -101,11 +185,14 @@ function appService(
     const service: YamlMap = {
       image: `dbox/${app}:${ctx.imageTag}`,
       build: { context: ctx.sourcePath, dockerfile: target.dockerfile },
+      pull_policy: PULL_JAMAIS,
       env_file: ["./.env"],
       restart: "unless-stopped",
       networks: ["internal"],
     };
     if (target.data !== null) service["volumes"] = [`data:${target.data}`];
+    dependre(service, compagnons);
+    publish(service, ctx, project, publicDomain, target.port);
     return service;
   }
 
@@ -129,8 +216,79 @@ function appService(
 
   if (target.dockerfile !== null) {
     service["build"] = { context: ctx.sourcePath, dockerfile: target.dockerfile };
+    service["pull_policy"] = PULL_JAMAIS;
   }
+  dependre(service, compagnons);
+  publish(service, ctx, project, publicDomain, target.port);
   return service;
+}
+
+/**
+ * Un service compagnon : une image toute faite sur le réseau interne, rien de
+ * plus. **Jamais de `ports`, jamais de labels Traefik, jamais le réseau
+ * public** — seul le service `app` est exposé, ici comme ailleurs
+ * (invariant 1). Il partage le `.env` de l'app : c'est ce que fait un compose
+ * écrit à la main, le fichier est déjà en 0600, et une image ignore les
+ * variables qu'elle ne connaît pas.
+ */
+function companionService(nom: string, service: CompanionService): YamlMap {
+  const rendu: YamlMap = {
+    image: service.image,
+    env_file: ["./.env"],
+    restart: "unless-stopped",
+    networks: ["internal"],
+  };
+  // Nommé d'après le service : deux compagnons qui stockent ne se marchent
+  // jamais dessus, et aucun ne peut réclamer `data`, qui est à l'app.
+  if (service.data !== null) rendu["volumes"] = [`${nom}-data:${service.data}`];
+  return rendu;
+}
+
+/**
+ * L'app démarre après ses compagnons. Sans `condition` : aucun healthcheck
+ * n'étant disponible sur une image toute faite, Docker ne peut garantir que
+ * « lancé », pas « prêt ». C'est donc à l'app de réessayer sa connexion — ce
+ * qu'elle devrait faire de toute façon, un redémarrage de base la lui
+ * imposerait aussi.
+ */
+function dependre(service: YamlMap, compagnons: string[]): void {
+  if (compagnons.length > 0) service["depends_on"] = [...compagnons];
+}
+
+/**
+ * Branche le conteneur d'app sur le Traefik de la machine — **sans jamais
+ * publier de port** : Traefik l'atteint par le réseau Docker partagé, comme le
+ * sidecar le fait déjà par le réseau interne. L'invariant du mode privé tient
+ * donc aussi pour une cible publique.
+ *
+ * Le nom de routeur dérive du projet complet (`dbox-<app>-<cible>`), jamais du
+ * seul nom d'app : deux apps DBox différentes ne doivent pas pouvoir écraser
+ * la route l'une de l'autre.
+ */
+function publish(
+  service: YamlMap,
+  ctx: Context,
+  project: string,
+  publicDomain: string | null,
+  port: number,
+): void {
+  if (publicDomain === null) return;
+  const { network, certResolver } = ctx.traefik!;
+
+  service["networks"] = [...(service["networks"] as string[]), network];
+  service["labels"] = [
+    // Le Traefik de référence tourne en `exposedByDefault: false` : sans ce
+    // label, rejoindre son réseau ne suffit pas à être routé. C'est voulu.
+    "traefik.enable=true",
+    `traefik.http.routers.${project}.rule=Host(\`${publicDomain}\`)`,
+    `traefik.http.routers.${project}.entrypoints=websecure`,
+    `traefik.http.routers.${project}.tls.certresolver=${certResolver}`,
+    `traefik.http.services.${project}.loadbalancer.server.port=${port}`,
+    // Obligatoire dès qu'un conteneur est sur plus d'un réseau : sinon Traefik
+    // peut tenter de joindre l'app par le réseau interne de DBox, qu'il ne voit
+    // pas — panne silencieuse, et pénible à diagnostiquer.
+    `traefik.docker.network=${network}`,
+  ];
 }
 
 function tailscaleService(

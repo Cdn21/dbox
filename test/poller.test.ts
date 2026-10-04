@@ -18,6 +18,8 @@ function entry(over: Partial<Entry["descriptor"]> = {}): Entry {
       project: "dbox-budget-prod",
       source: "/home/serve/dbox/budget",
       autoDeploy: true,
+      publicDomain: null,
+      services: [],
       ...over,
     },
     state: null,

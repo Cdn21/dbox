@@ -64,6 +64,8 @@ describe("manifeste produit", () => {
       autoDeploy: false,
       tsTag: null,
       sshPort: null,
+      publicDomain: null,
+      services: {},
     });
   });
 
@@ -81,6 +83,55 @@ describe("squelette pour le formulaire d'ajout", () => {
     assert.equal(targetNameFor("deployed"), "prod");
     assert.equal(targetNameFor("workspace"), "dev");
     assert.equal(targetNameFor("devcontainer"), "dev");
+  });
+
+  it("pose l'image choisie pour un devcontainer non-Node", () => {
+    const toml = renderScaffold({
+      name: "mon-projet",
+      mode: "devcontainer",
+      port: 8000,
+      command: "uvicorn app:app --host 0.0.0.0",
+      image: "python:3.13-slim",
+    });
+    // Le vrai contrat : ce que le formulaire écrit doit se relire.
+    const manifest = parseManifest(toml);
+    const cible = manifest.targets["dev"]!;
+    assert.equal(cible.mode === "devcontainer" ? cible.image : null, "python:3.13-slim");
+    assert.equal(cible.mode === "devcontainer" ? cible.dockerfile : "x", null);
+  });
+
+  it("pose le Dockerfile choisi, pour un projet qui mêle deux runtimes", () => {
+    const toml = renderScaffold({
+      name: "mon-projet",
+      mode: "devcontainer",
+      port: 5173,
+      command: "./run.sh",
+      dockerfile: "Dockerfile.dev",
+    });
+    const cible = parseManifest(toml).targets["dev"]!;
+    assert.equal(cible.mode === "devcontainer" ? cible.dockerfile : null, "Dockerfile.dev");
+  });
+
+  it("n'écrit ni image ni dockerfile quand ils ne sont pas choisis", () => {
+    const toml = renderScaffold({ name: "a", mode: "devcontainer", port: 3000, command: "npm run dev" });
+    assert.doesNotMatch(toml, /^image =/m);
+    assert.doesNotMatch(toml, /^dockerfile =/m);
+    // Le défaut du manifeste s'applique alors, sans être écrit en dur.
+    const cible = parseManifest(toml).targets["dev"]!;
+    assert.equal(cible.mode === "devcontainer" ? cible.image : null, "node:24-bookworm-slim");
+  });
+
+  it("ignore image et dockerfile en workspace, que le manifeste refuserait", () => {
+    const toml = renderScaffold({
+      name: "a",
+      mode: "workspace",
+      port: 3000,
+      command: "npm run dev",
+      image: "python:3.13-slim",
+      dockerfile: "Dockerfile.dev",
+    });
+    assert.doesNotMatch(toml, /image|dockerfile/);
+    assert.doesNotThrow(() => parseManifest(toml));
   });
 
   it("produit un manifeste valide en workspace, avec la commande fournie", () => {
@@ -108,6 +159,8 @@ describe("squelette pour le formulaire d'ajout", () => {
       autoDeploy: false,
       tsTag: null,
       sshPort: null,
+      publicDomain: null,
+      services: {},
     });
   });
 
@@ -154,6 +207,16 @@ target = "prod"
   it("refuse une clé inconnue plutôt que de l'ignorer", () => {
     assert.throws(() => parseConfig('tailnett = "x"'), /clé inconnue/);
   });
+
+  it("lit les réglages Traefik du mode public", () => {
+    assert.deepEqual(
+      parseConfig(`
+traefik_network = "traefik-net"
+traefik_cert_resolver = "letsencrypt"
+`),
+      { traefikNetwork: "traefik-net", traefikCertResolver: "letsencrypt" },
+    );
+  });
 });
 
 describe("sérialisation de la configuration", () => {
@@ -164,6 +227,8 @@ describe("sérialisation de la configuration", () => {
       tsTag: "tag:dbox",
       target: "dev",
       authkeyFile: "/home/cde/dbox/authkey",
+      traefikNetwork: "traefik-net",
+      traefikCertResolver: "letsencrypt",
     };
     assert.deepEqual(parseConfig(serializeConfig(config)), config);
   });

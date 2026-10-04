@@ -25,10 +25,15 @@
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Compose, RunResult } from "./docker.ts";
 import { track, type Jobs } from "./jobs.ts";
+import type { VersionInfo } from "./versions.ts";
 import {
+  apercuManifeste,
   applyEnv,
   logsOf,
+  resolveWorkspacePath,
   readEnv,
+  restartTarget,
+  readGeneratedFiles,
   readManifestTarget,
   startTarget,
   stopTarget,
@@ -40,19 +45,26 @@ import type { NewTargetMode } from "./init.ts";
 import { validateEntries, type EnvEntry } from "./env.ts";
 import {
   actionResult,
+  apercuFragment,
   cleAppFragment,
   envPanelFragment,
   escape,
+  fichiersPanelFragment,
   ICON_SVG,
   jobFragment,
   logsFragment,
+  redeployerMaintenant,
   MANIFEST_JSON,
   manifestPanelFragment,
+  cleCible,
   renderList,
   renderPage,
+  type Extras,
+  type JobView,
   renderSettingsPage,
   sshKeyPanel,
-} from "./page.ts";
+  type TraefikStatus,
+} from "./ui/index.ts";
 import { ACTION_HEADER, IDENTITY_HEADERS } from "./protocol.ts";
 import { HTMX_JS, ALPINE_JS } from "./vendor.ts";
 import type { AuthkeyNotice } from "./authkey.ts";
@@ -107,6 +119,12 @@ export interface Deps {
   /** Présence de `--ts-tag` dans `tagOwners` de la policy Tailscale — même
    * principe que `orphansReport` : écrit ailleurs, lu tel quel ici. */
   tagReport?: () => Promise<TagReport | null>;
+  /** Les réglages du mode public reçus au démarrage — `undefined` : non
+   * configuré sur cette machine, le panneau reste absent de /settings. */
+  traefik?: TraefikStatus;
+  /** Version gravée dans l'image à la construction (`$DBOX_VERSION`) —
+   * `undefined` : rien à afficher, comme les autres renseignements. */
+  version?: string;
   /** La clé publique n'est pas un secret : lisible même sans capacité d'écrire. */
   sshKeyStatus?: () => Promise<{ exists: boolean; publicKey: string | null }>;
   /** Idem, pour la clé dédiée d'une app en particulier. */
@@ -123,6 +141,9 @@ export interface Deps {
    * y en a un — pré-remplit le champ Commande au lieu de le laisser deviner
    * depuis un simple placeholder. */
   listWorkspaces?: () => Promise<{ name: string; command: string | null }[]>;
+  /** Lien vers le commit déployé et retard de la source (`versions.ts`) —
+   * absent, les cartes montrent le SHA nu, comme avant. */
+  versionInfo?: (source: string, tag: string) => Promise<VersionInfo>;
 }
 
 type Headers = Record<string, string | string[] | undefined>;
@@ -169,9 +190,12 @@ export async function route(
       const machines = deps.machines === undefined ? [] : await deps.machines();
       const canAddLocal = deps.actions?.addLocal !== undefined;
       const projects = canAddLocal && deps.listWorkspaces !== undefined ? await deps.listWorkspaces() : [];
+      const entries = await deps.scan();
+      const orphans = deps.orphansReport === undefined ? null : await deps.orphansReport();
+      const tagReport = deps.tagReport === undefined ? null : await deps.tagReport();
       return html(
         renderPage(
-          await deps.scan(),
+          entries,
           deps.now(),
           viewer,
           deps.actions !== undefined,
@@ -180,6 +204,8 @@ export async function route(
           canAddLocal ? (deps.workspacesRoot ?? null) : null,
           projects,
           adminNotice,
+          await extrasPour(entries, deps),
+          { orphans, tag: tagReport },
         ),
       );
     }
@@ -204,6 +230,8 @@ export async function route(
           orphans,
           tagReport,
           deps.now(),
+          deps.traefik ?? null,
+          deps.version ?? null,
         ),
       );
     }
@@ -226,8 +254,10 @@ export async function route(
       if (deps.sshKeyStatus === undefined) return text(404, "clé SSH non configurée sur cette machine\n");
       return json(await deps.sshKeyStatus());
     }
+    if (path === "/api/apps/apercu") return await apercuRoute(query, deps);
     if (path === "/api/apps/list") {
-      return html(renderList(await deps.scan(), deps.now(), deps.actions !== undefined));
+      const entries = await deps.scan();
+      return html(renderList(entries, deps.now(), deps.actions !== undefined, await extrasPour(entries, deps)));
     }
     if (path === "/api/apps") {
       return json(
@@ -256,12 +286,29 @@ export async function route(
 
       if (segments[4] === "logs") {
         const lines = Math.min(Math.max(Number(query.get("lines") ?? 200) || 200, 1), 2000);
+        // Filtré ici plutôt que dans la page : le bloc est remplacé toutes les
+        // 3 s, un filtre côté page serait perdu à chaque passage. Une simple
+        // sous-chaîne, sans regex — rien à interpréter dans ce qu'on tape.
+        const filtre = (query.get("q") ?? "").trim().slice(0, 100);
         const output = await logsOf(entry, deps.actions.compose, lines);
-        return html(logsFragment(output));
+        const garde =
+          filtre === ""
+            ? output
+            : output
+                .split("\n")
+                .filter((ligne) => ligne.toLowerCase().includes(filtre.toLowerCase()))
+                .join("\n");
+        return html(logsFragment(entry.descriptor.app, entry.descriptor.target, lines, garde, filtre));
       }
       if (segments[4] === "env") {
         const entries = await readEnv(entry, deps.actions.readFile);
         return html(envPanelFragment(entry.descriptor.app, entry.descriptor.target, entries));
+      }
+      if (segments[4] === "fichiers") {
+        const fichiers = await readGeneratedFiles(entry, deps.actions.readFile);
+        return html(
+          fichiersPanelFragment(entry.descriptor.source, entry.state?.previousTag ?? null, fichiers),
+        );
       }
       if (segments[4] === "manifest") {
         try {
@@ -330,10 +377,18 @@ export async function route(
 async function act(entry: Entry, action: string, actions: Actions): Promise<Response> {
   const label = `${entry.descriptor.app}/${entry.descriptor.target}`;
 
-  if (action === "start" || action === "stop") {
+  if (action === "start" || action === "stop" || action === "restart") {
+    // Même garde que `remove` : un redéploiement construit puis fait `up -d` ;
+    // un redémarrage glissé entre les deux relancerait l'ancien conteneur, et
+    // un arrêt couperait une cible que le redéploiement est en train de lever.
+    if (actions.jobs.runningFor(label) !== null) {
+      return html(actionResult(false, "un redéploiement est en cours — réessaie une fois terminé", false));
+    }
     const result = await (action === "start"
       ? startTarget(entry, actions.compose)
-      : stopTarget(entry, actions.compose));
+      : action === "stop"
+        ? stopTarget(entry, actions.compose)
+        : restartTarget(entry, actions.compose));
     const ok = result.code === 0;
     return html(actionResult(ok, ok ? null : result.stderr || result.stdout, true));
   }
@@ -387,13 +442,73 @@ function parseChoice(form: URLSearchParams): ChoiceResult {
     return { ok: false, detail: "commande manquante pour ce mode" };
   }
 
-  return { ok: true, choice: { mode: mode as NewTargetMode, port, command } };
+  const choice: NewTargetChoice = { mode: mode as NewTargetMode, port, command };
+
+  // Réservés au devcontainer : ailleurs le manifeste les refuserait, et les
+  // laisser passer écrirait un dbox.toml invalide qu'on ne pourrait plus relire.
+  // Posées seulement si renseignées — une clé à `undefined` n'est pas la même
+  // chose qu'une clé absente pour qui compare l'objet.
+  if (mode === "devcontainer") {
+    const image = form.get("image")?.trim();
+    const dockerfile = form.get("dockerfile")?.trim();
+    if (image !== undefined && image !== "") choice.image = image;
+    if (dockerfile !== undefined && dockerfile !== "") choice.dockerfile = dockerfile;
+  }
+
+  return { ok: true, choice };
+}
+
+/**
+ * Les champs cachés par Alpine partent quand même avec le formulaire : choisir
+ * un dossier local puis revenir à « Dépôt git » envoyait les deux, et le
+ * chemin l'emportait — on ajoutait le dossier au lieu de cloner l'URL. Le
+ * formulaire dit maintenant quelle source il montre (`source`), et c'est elle
+ * qui décide. Sans ce champ (un appel direct à l'API), l'ancienne règle tient.
+ */
+function sourceDuFormulaire(form: URLSearchParams): { url: string; path: string } {
+  const url = (form.get("url") ?? "").trim();
+  const path = (form.get("path") ?? "").trim();
+  const source = form.get("source");
+  if (source === "git") return { url, path: "" };
+  if (source === "local") return { url: "", path };
+  return { url, path };
+}
+
+async function apercuRoute(query: URLSearchParams, deps: Deps): Promise<Response> {
+  // Un champ pas encore rempli n'est pas une faute : l'aperçu attend, il ne
+  // reproche pas. Les vrais refus (port hors bornes) restent ceux de parseChoice.
+  const mode = query.get("mode");
+  if (mode !== null && mode !== "deployed" && ((query.get("port") ?? "") === "" || (query.get("command") ?? "").trim() === "")) {
+    return html(apercuFragment({ contenu: null, note: "indique le port et la commande pour voir le manifeste" }));
+  }
+  const parsed = parseChoice(query);
+  if (!parsed.ok) return html(apercuFragment({ contenu: null, note: parsed.detail }));
+  const { url, path } = sourceDuFormulaire(query);
+  const local = query.get("source") === "local";
+
+  let dossier: string | null = null;
+  if (local && path !== "") {
+    if (deps.workspacesRoot === undefined) {
+      return html(apercuFragment({ contenu: null, note: "pas de racine de dossiers locaux sur cette machine" }));
+    }
+    try {
+      dossier = resolveWorkspacePath(deps.workspacesRoot, path);
+    } catch (error) {
+      return html(apercuFragment({ contenu: null, note: (error as Error).message }));
+    }
+  }
+  const lire = deps.actions?.readFile ?? (() => Promise.reject(new Error("lecture indisponible")));
+  const apercu = await apercuManifeste(
+    { source: local ? "local" : "git", url, name: query.get("name")?.trim() || null, dossier },
+    parsed.choice,
+    lire,
+  ).catch((error: Error) => ({ contenu: null, note: error.message }));
+  return html(apercuFragment(apercu));
 }
 
 async function addApp(body: string, actions: Actions): Promise<Response> {
   const form = new URLSearchParams(body);
-  const url = (form.get("url") ?? "").trim();
-  const path = (form.get("path") ?? "").trim();
+  const { url, path } = sourceDuFormulaire(form);
   const name = form.get("name")?.trim() || null;
 
   const parsed = parseChoice(form);
@@ -423,6 +538,42 @@ async function addApp(body: string, actions: Actions): Promise<Response> {
   return html(jobFragment(result.started ? result.job : result.running));
 }
 
+/**
+ * Les lignes de services compagnons du formulaire. Une ligne entièrement vide
+ * est un « Ajouter » jamais rempli : ignorée en silence. Une ligne à moitié
+ * remplie est une vraie faute de saisie, signalée — même règle que le panneau
+ * des machines connues.
+ *
+ * Le reste (nom valide, image non vide, chemin absolu) n'est pas revérifié
+ * ici : `parseManifest` le fait déjà, et mieux.
+ */
+function parseServices(
+  form: URLSearchParams,
+): { ok: true; services: Record<string, { image: string; data: string | null }> } | { ok: false; detail: string } {
+  const noms = form.getAll("serviceNom");
+  const images = form.getAll("serviceImage");
+  const donnees = form.getAll("serviceData");
+
+  const services: Record<string, { image: string; data: string | null }> = {};
+
+  for (let i = 0; i < noms.length; i++) {
+    const nom = (noms[i] ?? "").trim();
+    const image = (images[i] ?? "").trim();
+    const data = (donnees[i] ?? "").trim();
+
+    if (nom === "" && image === "" && data === "") continue;
+    if (nom === "" || image === "") {
+      return { ok: false, detail: "un service compagnon veut au moins un nom et une image" };
+    }
+    if (services[nom] !== undefined) {
+      return { ok: false, detail: `deux services nommés « ${nom} » — Docker n'en garderait qu'un` };
+    }
+    services[nom] = { image, data: data === "" ? null : data };
+  }
+
+  return { ok: true, services };
+}
+
 async function saveManifestRoute(entry: Entry, body: string, actions: Actions): Promise<Response> {
   let current;
   try {
@@ -437,11 +588,42 @@ async function saveManifestRoute(entry: Entry, body: string, actions: Actions): 
     health: form.get("health")?.trim() || "/",
   };
   if (current.mode !== "deployed") changes.command = form.get("command") ?? "";
-  if (current.mode !== "workspace") changes.autoDeploy = form.has("autoDeploy");
+
+  // Un champ vidé remet le réglage à son défaut — c'est la seule façon de le
+  // retirer depuis un formulaire. Rien n'est validé ici : `writeManifestTarget`
+  // repasse par `parseManifest`, donc une saisie fautive ressort avec le
+  // message exact d'un dbox.toml écrit à la main, sans validation dupliquée.
+  const optionnel = (nom: string): string | null => {
+    const valeur = form.get(nom)?.trim();
+    return valeur === undefined || valeur === "" ? null : valeur;
+  };
+
+  changes.tsTag = optionnel("tsTag");
+
+  if (current.mode === "devcontainer") {
+    // `image` a un défaut, pas `dockerfile` : vider le premier le rétablit,
+    // vider le second retire la construction.
+    const image = optionnel("image");
+    if (image !== null) changes.image = image;
+    changes.dockerfile = optionnel("dockerfile");
+  }
+
+  if (current.mode !== "workspace") {
+    changes.autoDeploy = form.has("autoDeploy");
+    changes.publicDomain = optionnel("publicDomain");
+    changes.data = optionnel("data");
+
+    const services = parseServices(form);
+    if (!services.ok) return html(actionResult(false, services.detail, false));
+    changes.services = services.services;
+  }
 
   try {
     await writeManifestTarget(entry, changes, actions.readFile, actions.writeFile);
-    return html(actionResult(true, "enregistré — s'applique au prochain déploiement", false));
+    const { app, target } = entry.descriptor;
+    return html(
+      actionResult(true, "enregistré — s'applique au prochain déploiement", false, redeployerMaintenant(app, target)),
+    );
   } catch (error) {
     // Une erreur de validation (ManifestError) est une faute de saisie, pas une
     // panne : même message clair que dbox.toml écrit à la main.
@@ -483,6 +665,12 @@ async function saveEnvRoute(entry: Entry, body: string, actions: Actions): Promi
   const invalid = validateEntries(entries);
   if (invalid !== null) return html(actionResult(false, invalid, false));
 
+  // Même garde que start/stop/restart : appliquer fait un `up -d`, et pendant
+  // la construction le Compose pointe déjà vers une image qui n'existe pas encore.
+  if (actions.jobs.runningFor(`${entry.descriptor.app}/${entry.descriptor.target}`) !== null) {
+    return html(actionResult(false, "un redéploiement est en cours — réessaie une fois terminé", false));
+  }
+
   await writeEnv(entry, entries, actions.writeFile);
 
   // Recréer le conteneur suffit : l'image n'a pas changé, seul le fichier lu
@@ -492,6 +680,32 @@ async function saveEnvRoute(entry: Entry, body: string, actions: Actions): Promi
     return html(actionResult(true, "cible à l'arrêt : pris en compte au démarrage", false));
   }
   return html(actionResult(applied.code === 0, applied.code === 0 ? "enregistré et appliqué" : applied.stderr || applied.stdout, false));
+}
+
+/**
+ * Ce que les cartes montrent en plus du registre : la tâche en cours de
+ * chaque cible (pour que recharger la page n'en perde pas le suivi), et ce
+ * qu'on sait de sa version. Une erreur ici ne casse jamais la page : la
+ * carte retombe sur ce qu'elle montrait avant.
+ */
+async function extrasPour(entries: Entry[], deps: Deps): Promise<Extras> {
+  const jobs = new Map<string, JobView>();
+  for (const job of deps.actions?.jobs.list() ?? []) {
+    if (job.status === "en cours" && !jobs.has(job.label)) jobs.set(job.label, job);
+  }
+
+  const versions = new Map<string, VersionInfo>();
+  const calcule = deps.versionInfo;
+  if (calcule !== undefined) {
+    await Promise.all(
+      entries.map(async (entry) => {
+        if (entry.state === null) return;
+        const info = await calcule(entry.descriptor.source, entry.state.tag).catch(() => null);
+        if (info !== null) versions.set(cleCible(entry.descriptor.app, entry.descriptor.target), info);
+      }),
+    );
+  }
+  return { jobs, versions };
 }
 
 async function find(deps: Deps, app: string, target: string): Promise<Entry | null> {

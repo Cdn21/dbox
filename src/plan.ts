@@ -5,7 +5,7 @@
  * C'est `cli.ts --write` qui décide, plus tard, de matérialiser un plan.
  */
 
-import { composeFor, projectName, sshUpstreamFor, upstreamFor, type Context } from "./compose.ts";
+import { composeFor, projectName, publicDomainFor, sshUpstreamFor, upstreamFor, type Context } from "./compose.ts";
 import { hostnameFor, type Manifest, type Mode } from "./manifest.ts";
 import { serveConfigFor } from "./tsserve.ts";
 import { emitYaml } from "./yaml.ts";
@@ -42,6 +42,14 @@ export interface Descriptor {
   source: string;
   /** Le sondeur du daemon ne considère que les cibles marquées ainsi. */
   autoDeploy: boolean;
+  /** Noms des services compagnons de cette cible — le registre reste
+   * auto-descriptif : `ls` et le tableau de bord peuvent dire ce qui tourne
+   * réellement, pas seulement l'app. */
+  services: string[];
+  /** Domaine public de cette cible, `null` si elle est strictement privée.
+   * Écrit ici pour que le registre reste auto-descriptif — et c'est ce que lit
+   * `up()` pour refuser deux cibles qui revendiqueraient le même domaine. */
+  publicDomain: string | null;
 }
 
 export interface Plan {
@@ -58,6 +66,11 @@ export interface Plan {
   upstream: string;
   directory: string;
   files: PlannedFile[];
+  /** Domaine public résolu — `null` : cible strictement privée. */
+  publicDomain: string | null;
+  /** Noms des services compagnons — `up` s'en sert pour signaler celui qui ne
+   * démarre pas, que le contrôle de santé de l'app ne verrait jamais. */
+  services: string[];
 }
 
 const GENERATED_BY = "Généré par DBox — ne pas éditer à la main.";
@@ -68,6 +81,7 @@ export function planFor(manifest: Manifest, targetName: string, ctx: Context): P
     throw new Error(`cible « ${targetName} » inconnue — connues : ${Object.keys(manifest.targets).join(", ")}`);
   }
 
+  const publicDomain = publicDomainFor(target, ctx, targetName);
   const hostname = hostnameFor(manifest.name, targetName);
   const directory = `${ctx.root}/${manifest.name}/${targetName}`;
   const upstream = upstreamFor(target);
@@ -84,6 +98,8 @@ export function planFor(manifest: Manifest, targetName: string, ctx: Context): P
     project: projectName(manifest.name, targetName),
     source: ctx.sourcePath,
     autoDeploy: target.mode !== "workspace" && target.autoDeploy,
+    services: target.mode === "workspace" ? [] : Object.keys(target.services),
+    publicDomain,
   };
 
   const files: PlannedFile[] = [
@@ -138,6 +154,8 @@ export function planFor(manifest: Manifest, targetName: string, ctx: Context): P
     upstream,
     directory,
     files,
+    publicDomain,
+    services: descriptor.services,
   };
 }
 

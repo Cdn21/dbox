@@ -1,7 +1,7 @@
 # Installer DBox
 
 Guide pour quelqu'un qui découvre l'outil. Pour comprendre *comment* DBox
-pense — modes, manifeste, arbitrages — voir `README.md`, plus en profondeur.
+pense — modes, manifeste, arbitrages — voir [`REFERENCE.md`](REFERENCE.md), plus en profondeur.
 
 Il te faut être à l'aise avec un terminal.
 
@@ -11,6 +11,10 @@ Il te faut être à l'aise avec un terminal.
 - **Docker**, installé et utilisable sans `sudo` —
   [docs.docker.com/engine/install](https://docs.docker.com/engine/install/)
   si besoin.
+- **Tailscale installé et connecté sur cette même machine.** DBox vérifie
+  chaque app en interrogeant son adresse finale : si la machine n'est pas
+  elle-même sur ton réseau privé, chaque déploiement échoue au contrôle de
+  santé, alors que l'app tourne.
 
 ## 1. Ton réseau privé
 
@@ -18,7 +22,11 @@ DBox s'appuie sur [Tailscale](https://tailscale.com) pour créer ce réseau
 privé — gratuit, et c'est lui qui donne à chaque app son nom et son
 certificat HTTPS, automatiquement.
 
-Crée un compte, puis dans **Access controls → Definitions → Tags**, crée
+Crée un compte, puis dans **DNS**, active **MagicDNS** et **HTTPS
+Certificates** : sans eux, aucune app n'obtient de certificat, et la première
+ne démarrera jamais.
+
+Ensuite, dans **Access controls → Definitions → Tags**, crée
 deux tags — propriétaire `autogroup:admin` pour les deux :
 
 - `tag:dbox` — porté par chaque app que tu déploies
@@ -107,9 +115,13 @@ Vérifie `~/dbox/authkey` : rien d'autre que la clé, aucun texte du modèle
 laissé autour (voir l'aparté de l'étape 2).
 
 **Le premier démarrage dépasse les 180 secondes**
-Normal à l'occasion — le certificat HTTPS met parfois un peu de temps à
-être délivré. `dbox up` te dira où regarder si ça persiste :
+Vérifie d'abord que les certificats HTTPS sont activés dans les réglages DNS
+du tailnet (étape 1). Sinon, c'est normal à l'occasion — le certificat HTTPS
+met parfois un peu de temps à être délivré. `dbox up` te dira où regarder si ça persiste :
 `docker logs <projet>-tailscale-1`.
+
+**Le contrôle de santé échoue alors que l'app tourne**
+La machine qui exécute DBox doit être sur le tailnet (`tailscale status`).
 
 **`docker: command not found` ou accès refusé au socket**
 Docker doit être installé *et* utilisable sans `sudo` — ajoute ton

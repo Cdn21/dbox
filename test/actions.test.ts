@@ -16,6 +16,8 @@ function entry(): Entry {
       project: "dbox-budget-prod",
       source: "/home/serve/dbox/budget",
       autoDeploy: false,
+      publicDomain: null,
+      services: [],
     },
     state: null,
     status: "en marche",
@@ -144,6 +146,55 @@ describe("liste des projets d'un dossier de travail", () => {
       { name: "a", command: null },
       { name: "b", command: null },
       { name: "c", command: null },
+    ]);
+  });
+});
+
+describe("deviner la commande quand le front est dans un sous-dossier", () => {
+  it("suggère « npm --prefix <sous-dossier> run dev »", async () => {
+    const readdir = async () => [entree("selfrecon", true)];
+    const readFile = async (path: string) => {
+      if (path === "/home/cde/dev/selfrecon/frontend/package.json") {
+        return JSON.stringify({ scripts: { dev: "vite" } });
+      }
+      throw new Error("ENOENT");
+    };
+    assert.deepEqual(await listWorkspaces("/home/cde/dev", readdir, readFile), [
+      { name: "selfrecon", command: "npm --prefix frontend run dev" },
+    ]);
+  });
+
+  it("ne sonde les sous-dossiers que si la racine n'a rien donné", async () => {
+    // Sinon `listWorkspaces` ferait six lectures de plus par dossier, pour
+    // chaque dossier de la racine des espaces de travail.
+    const readdir = async () => [entree("budget", true)];
+    const lus: string[] = [];
+    const readFile = async (path: string) => {
+      lus.push(path);
+      return JSON.stringify({ scripts: { dev: "vite" } });
+    };
+    await listWorkspaces("/home/cde/dev", readdir, readFile);
+    assert.deepEqual(lus, ["/home/cde/dev/budget/package.json"]);
+  });
+
+  it("prend le premier sous-dossier qui répond, dans l'ordre de la convention", async () => {
+    const readdir = async () => [entree("app", true)];
+    const readFile = async (path: string) => {
+      if (path.includes("/web/") || path.includes("/frontend/")) {
+        return JSON.stringify({ scripts: { dev: "vite" } });
+      }
+      throw new Error("ENOENT");
+    };
+    assert.deepEqual(await listWorkspaces("/home/cde/dev", readdir, readFile), [
+      { name: "app", command: "npm --prefix frontend run dev" },
+    ]);
+  });
+
+  it("ne suggère rien quand aucun sous-dossier n'a de script dev", async () => {
+    const readdir = async () => [entree("kotlin-pur", true)];
+    const readFile = async () => JSON.stringify({ scripts: { build: "tsc" } });
+    assert.deepEqual(await listWorkspaces("/home/cde/dev", readdir, readFile), [
+      { name: "kotlin-pur", command: null },
     ]);
   });
 });
