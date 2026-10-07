@@ -28,6 +28,7 @@ function entry(over: Partial<Entry["descriptor"]> = {}, state: Entry["state"] = 
       source: `/srv/${app}`,
       autoDeploy: false,
       publicDomain: null,
+      backend: "tailscale",
       services: [],
       ...over,
     },

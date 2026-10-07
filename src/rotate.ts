@@ -14,6 +14,7 @@
 
 import { expiryPath, readAuthkeyNotice } from "./authkey.ts";
 import type { NewAuthKey } from "./tailscale.ts";
+import type { NewPreAuthKey } from "./headscale.ts";
 
 /** En dessous de ce seuil, une rotation est déclenchée — largement avant
  * l'échéance, pour qu'un souci passager (API indisponible, token expiré)
@@ -88,6 +89,64 @@ export async function rotateOnce(deps: RotateDeps): Promise<void> {
 export function startRotating(intervalMs: number, deps: RotateDeps): () => void {
   const timer = setInterval(() => {
     rotateOnce(deps).catch((error: Error) => deps.log(`rotation : ${error.message}`));
+  }, intervalMs);
+  return () => clearInterval(timer);
+}
+
+/**
+ * Rotation de la clé préauth Headscale — même forme que `rotateOnce`, mais
+ * contre l'API Headscale, et l'expiration de l'ancienne se fait **par sa
+ * valeur** (Headscale n'expose pas d'id exploitable). D'où la lecture de
+ * l'ancienne clé avant de l'écraser — pas de fichier `.id` (qui, en 0644,
+ * laisserait fuiter une clé).
+ */
+export interface HeadscaleRotateDeps {
+  authkeyFile: string;
+  loginServer: string;
+  user: string;
+  readFile: (path: string) => Promise<string>;
+  writeFile: (path: string, content: string, mode: number) => Promise<void>;
+  readToken: () => Promise<string>;
+  createKey: (loginServer: string, token: string, user: string) => Promise<NewPreAuthKey>;
+  expireKey: (loginServer: string, token: string, user: string, key: string) => Promise<void>;
+  now: () => number;
+  log: (line: string) => void;
+}
+
+export async function rotateHeadscaleOnce(deps: HeadscaleRotateDeps): Promise<void> {
+  const notice = await readAuthkeyNotice(deps.authkeyFile, deps.readFile, deps.now());
+  if (notice !== null && notice.daysLeft > ROTATE_WITHIN_DAYS) {
+    deps.log(`clé Headscale encore valide ${notice.daysLeft} j — rien à faire`);
+    return;
+  }
+
+  const token = (await deps.readToken()).trim();
+  if (token === "") {
+    deps.log("token d'API Headscale absent ou vide — rotation impossible");
+    return;
+  }
+
+  // L'ancienne clé, lue avant l'écrasement : c'est elle qu'on expirera.
+  const oldKey = (await deps.readFile(deps.authkeyFile).catch(() => "")).trim();
+
+  const created = await deps.createKey(deps.loginServer, token, deps.user);
+  await deps.writeFile(deps.authkeyFile, `${created.key}\n`, 0o600);
+  await deps.writeFile(expiryPath(deps.authkeyFile), `${created.expiresOn}\n`, 0o644);
+  deps.log(`nouvelle clé Headscale posée, expire le ${created.expiresOn}`);
+
+  if (oldKey === "") return; // rien à expirer, première rotation
+
+  try {
+    await deps.expireKey(deps.loginServer, token, deps.user, oldKey);
+    deps.log("ancienne clé Headscale expirée");
+  } catch (error) {
+    deps.log(`ancienne clé Headscale non expirée : ${(error as Error).message}`);
+  }
+}
+
+export function startRotatingHeadscale(intervalMs: number, deps: HeadscaleRotateDeps): () => void {
+  const timer = setInterval(() => {
+    rotateHeadscaleOnce(deps).catch((error: Error) => deps.log(`rotation Headscale : ${error.message}`));
   }, intervalMs);
   return () => clearInterval(timer);
 }

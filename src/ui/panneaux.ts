@@ -157,6 +157,20 @@ export function manifestPanelFragment(
         spellcheck="false" autocapitalize="off">
     </label>`;
 
+  // Le backend d'exposition de cette cible : défaut machine, Tailscale, ou
+  // Headscale. « headscale » demande les réglages machine (voir /settings) et
+  // refuse ssh_port — le serveur re-valide, le select n'est qu'un raccourci.
+  const opt = (v: string, label: string) =>
+    `<option value="${v}"${(cible.backend ?? "") === v ? " selected" : ""}>${label}</option>`;
+  const champBackend = `<label class="champ">
+      <span>backend <small>défaut machine sinon</small></span>
+      <select name="backend">
+        ${opt("", "— défaut machine —")}
+        ${opt("tailscale", "tailscale")}
+        ${opt("headscale", "headscale")}
+      </select>
+    </label>`;
+
   return `<form class="conf" hx-post="${base}/manifest" hx-target="#sortie-${id}" hx-swap="innerHTML">
   <div class="reglages-champs">
     <label class="champ">
@@ -171,6 +185,7 @@ export function manifestPanelFragment(
     ${champEnv}
     ${champData}
     ${champTag}
+    ${champBackend}
     ${champAuto}
     ${champPublic}
   </div>

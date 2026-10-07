@@ -74,6 +74,9 @@ function complete(descriptor: Descriptor): Descriptor {
     ...descriptor,
     services: descriptor.services ?? [],
     publicDomain: descriptor.publicDomain ?? null,
+    // Un dbox.json écrit avant le backend headscale n'a pas ce champ : il
+    // décrit forcément une cible Tailscale, le seul backend d'alors.
+    backend: descriptor.backend ?? "tailscale",
   };
 }
 

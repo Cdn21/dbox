@@ -17,6 +17,29 @@ export interface Config {
   root?: string;
   tailnet?: string;
   tsTag?: string;
+  /** Backend d'exposition par défaut de cette machine — une cible peut le
+   * redéfinir (`backend` dans son `dbox.toml`), comme `ts_tag`. Absent :
+   * « tailscale », le comportement d'aujourd'hui. */
+  backend?: string;
+  /** URL du serveur de coordination Headscale (`--login-server` du sidecar) —
+   * nécessaire dès qu'une cible résout à `backend = "headscale"`. */
+  headscaleLoginServer?: string;
+  /** Dossier hôte du certificat wildcard du tailnet (`<tailnet>.crt`/`.key`),
+   * obtenu une fois, à la main, par DNS-01 — DBox ne l'obtient ni ne le
+   * renouvelle jamais, même statut manuel que `authkeyFile`. */
+  headscaleCertDir?: string;
+  /** Clé préauth Headscale, semée dans le `ts.env` des cibles headscale —
+   * jamais `authkeyFile`. */
+  headscaleAuthkeyFile?: string;
+  /** **ID numérique** du user Headscale sous lequel créer les clés préauth
+   * (ex. "1") — l'API Headscale refuse un nom. `headscale users list` le donne. */
+  headscaleUser?: string;
+  /** Token d'API Headscale, pour la rotation de la clé préauth — jamais lu par
+   * le daemon, vit dans `secrets/` comme le token Tailscale. */
+  headscaleApiTokenFile?: string;
+  /** Image (celle du daemon) qui sert de conteneur-sonde pour une cible
+   * headscale — voir `headscaleProbe`. Posée par `deploy/docker-compose.yml`. */
+  probeImage?: string;
   /**
    * La cible par défaut de **cette machine**. C'est elle qui décide : DBox sur
    * le serveur travaille sur `prod`, DBox sur le poste sur `dev`. Le manifeste
@@ -83,6 +106,13 @@ const KEYS: Record<string, keyof Config> = {
   root: "root",
   tailnet: "tailnet",
   ts_tag: "tsTag",
+  backend: "backend",
+  headscale_login_server: "headscaleLoginServer",
+  headscale_cert_dir: "headscaleCertDir",
+  headscale_authkey_file: "headscaleAuthkeyFile",
+  headscale_user: "headscaleUser",
+  headscale_api_token_file: "headscaleApiTokenFile",
+  probe_image: "probeImage",
   target: "target",
   sources: "sources",
   authkey_file: "authkeyFile",
@@ -130,6 +160,7 @@ const ORDER: (keyof Config)[] = [
   "root",
   "tailnet",
   "tsTag",
+  "backend",
   "target",
   "sources",
   "authkeyFile",
@@ -142,6 +173,12 @@ const ORDER: (keyof Config)[] = [
   "workspacesRoot",
   "traefikNetwork",
   "traefikCertResolver",
+  "headscaleLoginServer",
+  "headscaleCertDir",
+  "headscaleAuthkeyFile",
+  "headscaleUser",
+  "headscaleApiTokenFile",
+  "probeImage",
 ];
 const KEY_NAMES = Object.fromEntries(Object.entries(KEYS).map(([k, v]) => [v, k])) as Record<
   keyof Config,

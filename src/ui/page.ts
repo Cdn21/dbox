@@ -61,6 +61,7 @@ export function renderPage(
   adminAuthkeyNotice: AuthkeyNotice | null = null,
   extras: Extras = {},
   rapports: Rapports = {},
+  headscaleAuthkeyNotice: AuthkeyNotice | null = null,
 ): string {
   // htmx se sonde lui-même : le formulaire d'ajout reste en dehors de #cartes,
   // jamais retouché par le sondage. Mais le sondage remplace **toutes** les
@@ -125,7 +126,7 @@ ${PWA_HEAD}
     ${actionable ? `<a class="reglages" href="/settings">Réglages</a>` : ""}
   </div>
 </header>
-${authkeyBanner(authkeyItems(authkeyNotice, adminAuthkeyNotice))}
+${authkeyBanner(authkeyItems(authkeyNotice, adminAuthkeyNotice, headscaleAuthkeyNotice))}
 ${actionable ? rappels(rapports) : ""}
 ${ajout}
 ${cartes}

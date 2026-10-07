@@ -98,3 +98,20 @@ describe("attente", () => {
     assert.equal(slept, 0);
   });
 });
+
+describe("pinnedHttpProbe : robustesse", () => {
+  it("une URL mal formée est injoignable, jamais une exception", async () => {
+    const { pinnedHttpProbe } = await import("../src/health.ts");
+    assert.equal(await pinnedHttpProbe("127.0.0.1")("pas une url"), null);
+  });
+});
+
+describe("run : garde-temps", () => {
+  it("tue un processus qui dépasse le délai et rend un échec, sans pendre", async () => {
+    const { run } = await import("../src/docker.ts");
+    const t0 = Date.now();
+    const res = await run("sleep", ["5"], { timeoutMs: 80 });
+    assert.notEqual(res.code, 0); // tué, donc pas un succès
+    assert.ok(Date.now() - t0 < 2000, "doit revenir bien avant les 5 s du sleep");
+  });
+});

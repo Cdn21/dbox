@@ -6,6 +6,25 @@ All notable changes to DBox. The format follows
 `deploy/` setup that works with one version keeps working with every later
 version of the same major.
 
+## [1.4.0] — 2026-10-07
+
+### Added
+
+- **Headscale as an alternative exposure backend.** A machine, or a single
+  target, can now be served through a self-hosted Headscale instead of
+  Tailscale. Pick it with `backend` — machine-wide in `config.toml`
+  (`--backend`, `DBOX_BACKEND`), or per target with `backend = "headscale"` in
+  `dbox.toml`, overriding the machine default like `ts_tag`. Headscale has no
+  `tailscale cert`, so a Headscale target runs a two-container sidecar that
+  terminates TLS with a wildcard certificate you supply; the machine points at
+  it with `headscale_login_server`, `headscale_cert_dir` and
+  `headscale_authkey_file`. DBox watches that certificate's expiry (a banner on
+  the settings page) and checks the Headscale prerequisites in `dbox doctor`
+  (server reachable, preauth key present, certificate present, correctly named
+  and not expired). The dashboard gains a backend selector per target. Tailscale
+  stays the default — nothing changes unless you opt in. `ssh_port` is not
+  supported with this backend.
+
 ## [1.3.1] — 2026-10-04
 
 ### Changed
@@ -141,6 +160,7 @@ First public version: `dbox.toml`, the three modes (`deployed`, `devcontainer`,
 with rollback, the dashboard, `dbox add` from git, SSH deploy keys, Tailscale
 auth key rotation, stale node and ACL tag reports.
 
+[1.4.0]: https://github.com/Cdn21/dbox/releases/tag/v1.4.0
 [1.3.1]: https://github.com/Cdn21/dbox/releases/tag/v1.3.1
 [1.3.0]: https://github.com/Cdn21/dbox/releases/tag/v1.3.0
 [1.2.0]: https://github.com/Cdn21/dbox/releases/tag/v1.2.0

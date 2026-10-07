@@ -204,10 +204,38 @@ ts_tag = "tag:budget-only"
 ```
 
 DBox ne fait que poser le tag sur le nœud — il ne touche jamais à la policy du tailnet.
-Le tag doit déjà exister dans `tagOwners`, sinon le sidecar échoue à s'enregistrer :
-même prérequis manuel que `tag:dbox` au tout premier démarrage. Restreindre `src` dans
-les `grants` de ce tag (à qui que ce soit d'autre que `autogroup:member`) reste à faire
-dans la console admin Tailscale.
+
+### Backend d'exposition : Tailscale ou Headscale
+
+Par défaut une cible est exposée via **Tailscale**. Une machine peut choisir
+**Headscale** (coordination auto-hébergée) comme défaut (`backend` dans
+`config.toml`, `--backend`, `DBOX_BACKEND`), et une cible peut le redéfinir
+comme `ts_tag` :
+
+```toml
+[targets.prod]
+mode = "deployed"
+port = 8080
+backend = "headscale"   # sinon le défaut de la machine
+```
+
+En backend Headscale, `tailscale serve` ne pouvant pas obtenir de certificat
+(pas de `tailscale cert`), DBox génère un sidecar à **deux conteneurs** —
+`tailscaled` non-userspace + un Caddy voisin qui termine le TLS avec un
+certificat wildcard que tu fournis. La machine pose alors
+`headscale_login_server`, `headscale_cert_dir` (dossier du `<tailnet>.crt`/
+`.key`) et `headscale_authkey_file` (clé préauth distincte de la clé Tailscale).
+Le rotateur régénère cette clé via l'API Headscale si `headscale_api_token_file`
+et `headscale_user` (son **id numérique**) sont posés. `ssh_port` n'est pas pris
+en charge avec ce backend.
+
+En Headscale la clé préauth appartient à un **user** (pas à un tag) : ce user doit
+exister dans Headscale, et c'est la policy ACL de **ton** Headscale qui restreint
+qui joint les nœuds — pas la console Tailscale. En backend **Tailscale**, le
+prérequis équivalent est que `tag:dbox` existe déjà dans `tagOwners`, sinon le
+sidecar échoue à s'enregistrer ; restreindre `src` dans les `grants` de ce tag
+(à autre chose que `autogroup:member`) reste à faire à la main dans la console
+admin Tailscale. Les deux cas sont des prérequis manuels du premier démarrage.
 
 ### Services compagnons
 

@@ -84,7 +84,22 @@ interface Companioned {
   services: Record<string, CompanionService>;
 }
 
-export interface WorkspaceTarget extends Checked, Tagged, Forwardable {
+export type Backend = "tailscale" | "headscale";
+
+/**
+ * Le backend d'exposition de cette cible précisément — « tailscale »
+ * (coordination SaaS, TLS automatique via `tailscale cert`) ou « headscale »
+ * (coordination auto-hébergée ; `tailscale serve` n'a pas d'équivalent à
+ * `tailscale cert` contre un Headscale, donc un Caddy voisin termine le TLS
+ * avec un certificat wildcard externe, jamais obtenu par DBox — voir
+ * `backendFor` et `caddyService` dans compose.ts). `null` : hérite du backend
+ * par défaut de la machine (`--backend`), le cas courant, comme `ts_tag`.
+ */
+interface Backed {
+  backend: Backend | null;
+}
+
+export interface WorkspaceTarget extends Checked, Tagged, Forwardable, Backed {
   mode: "workspace";
   port: number;
   command: string;
@@ -99,7 +114,7 @@ interface Pollable {
   autoDeploy: boolean;
 }
 
-export interface DevcontainerTarget extends Checked, Pollable, Tagged, Forwardable, Published, Companioned {
+export interface DevcontainerTarget extends Checked, Pollable, Tagged, Forwardable, Published, Companioned, Backed {
   mode: "devcontainer";
   port: number;
   command: string;
@@ -112,7 +127,7 @@ export interface DevcontainerTarget extends Checked, Pollable, Tagged, Forwardab
   dockerfile: string | null;
   data: string | null;
 }
-export interface DeployedTarget extends Checked, Pollable, Tagged, Forwardable, Published, Companioned {
+export interface DeployedTarget extends Checked, Pollable, Tagged, Forwardable, Published, Companioned, Backed {
   mode: "deployed";
   port: number;
   dockerfile: string;
@@ -164,7 +179,7 @@ export function hostnameFor(name: string, target: string): string {
 
 const MODES: readonly Mode[] = ["workspace", "devcontainer", "deployed"];
 const KEYS_BY_MODE: Record<Mode, readonly string[]> = {
-  workspace: ["mode", "port", "command", "health", "ts_tag", "ssh_port"],
+  workspace: ["mode", "port", "command", "health", "ts_tag", "ssh_port", "backend"],
   devcontainer: [
     "mode",
     "port",
@@ -178,6 +193,7 @@ const KEYS_BY_MODE: Record<Mode, readonly string[]> = {
     "ssh_port",
     "public_domain",
     "services",
+    "backend",
   ],
   deployed: [
     "mode",
@@ -190,8 +206,11 @@ const KEYS_BY_MODE: Record<Mode, readonly string[]> = {
     "ssh_port",
     "public_domain",
     "services",
+    "backend",
   ],
 };
+
+const BACKENDS: readonly Backend[] = ["tailscale", "headscale"];
 
 /**
  * Noms qu'un compagnon ne peut pas porter : ils entreraient en collision avec
@@ -286,6 +305,7 @@ export function serializeManifest(manifest: Manifest): string {
     }
     if (target.health !== DEFAULT_HEALTH) lines.push(`health = ${str(target.health)}`);
     if (target.tsTag !== null) lines.push(`ts_tag = ${str(target.tsTag)}`);
+    if (target.backend !== null) lines.push(`backend = ${str(target.backend)}`);
     if (target.sshPort !== null) lines.push(`ssh_port = ${target.sshPort}`);
     if (target.mode !== "workspace" && target.publicDomain !== null) {
       lines.push(`public_domain = ${str(target.publicDomain)}`);
@@ -485,6 +505,15 @@ function parseTarget(
     publicDomain = rawPublicDomain;
   }
 
+  const rawBackend = raw["backend"];
+  let backend: Backend | null = null;
+  if (rawBackend !== undefined) {
+    if (typeof rawBackend !== "string" || !BACKENDS.includes(rawBackend as Backend)) {
+      fail(`${path}.backend`, `« backend » doit être « tailscale » ou « headscale » (reçu « ${String(rawBackend)} »)`);
+    }
+    backend = rawBackend as Backend;
+  }
+
   const services = parseServices(raw["services"], path, fail);
 
   if (mode === "deployed") {
@@ -503,6 +532,7 @@ function parseTarget(
       sshPort,
       publicDomain,
       services,
+      backend,
     };
   }
 
@@ -522,6 +552,7 @@ function parseTarget(
       health: health as string,
       tsTag,
       sshPort,
+      backend,
     };
   }
 
@@ -546,6 +577,7 @@ function parseTarget(
     sshPort,
     publicDomain,
     services,
+    backend,
   };
 }
 

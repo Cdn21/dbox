@@ -21,6 +21,23 @@
 #   DBOX_HOME     racine des données DBox sur l'hôte, obligatoire
 #   DBOX_PORT     port interne du daemon (défaut 8099)
 #   DBOX_TSTAG    tag ACL des apps redéployées (défaut tag:dbox)
+#   DBOX_BACKEND  backend d'exposition des apps redéployées : tailscale ou
+#                 headscale (défaut tailscale) — jamais celui du daemon
+#                 lui-même, toujours exposé via son sidecar tailscale
+#   DBOX_HEADSCALE_LOGIN_SERVER / DBOX_HEADSCALE_CERT_DIR   réglages machine du
+#                 backend headscale (URL --login-server, dossier du certificat
+#                 wildcard du tailnet) — les deux ensemble ou aucun. Le cert-dir
+#                 est un chemin absolu de l'hôte, résolu par le dockerd de l'hôte
+#                 au `up` de chaque cible, pas par ce conteneur.
+#   DBOX_HEADSCALE_AUTHKEY   clé préauth Headscale, semée dans le ts.env des
+#                 cibles qui résolvent au backend headscale — jamais la même
+#                 chose que DBOX_AUTHKEY.
+#   DBOX_HEADSCALE_USER est l'ID NUMÉRIQUE du user (ex. 1), pas son nom.
+#   DBOX_HEADSCALE_API_TOKEN / DBOX_HEADSCALE_USER   pour la rotation de la clé
+#                 préauth Headscale par le rotator (API Headscale) — le token
+#                 vit sous secrets/, masqué au daemon comme le token Tailscale.
+#                 Rotation active seulement si authkey + token + user + login
+#                 server sont tous posés.
 #   DBOX_TRAEFIK_NETWORK / DBOX_TRAEFIK_CERT_RESOLVER   mode public : réseau
 #                         Docker externe du Traefik déjà en service sur cette
 #                         machine, et son resolver ACME. Les deux ensemble ou
@@ -119,6 +136,28 @@ services:
       # Le tag des apps qu'il redéploie — pas le sien, qui est dbox-admin.
       - --ts-tag
       - "${DBOX_TSTAG:-tag:dbox}"
+      # Backend des apps redéployées depuis le tableau de bord — pas celui du
+      # daemon lui-même, toujours exposé via le sidecar tailscale ci-dessous.
+      - --backend
+      - "${DBOX_BACKEND:-tailscale}"
+      # Chaînes vides par défaut : sans les deux posées, backendFor refuse toute
+      # cible qui demanderait le backend headscale, comme en CLI. Le cert-dir est
+      # un chemin absolu, résolu par le dockerd de l'hôte au `up` de chaque
+      # cible — aucun montage supplémentaire ici.
+      - --headscale-login-server
+      - "${DBOX_HEADSCALE_LOGIN_SERVER:-}"
+      - --headscale-cert-dir
+      - "${DBOX_HEADSCALE_CERT_DIR:-}"
+      # Jamais DBOX_AUTHKEY : une clé Tailscale n'authentifie rien contre un
+      # Headscale, et réciproquement — deux fichiers, jamais interchangeables.
+      - --headscale-authkey-file
+      - "${DBOX_HEADSCALE_AUTHKEY:-}"
+      # L'image du daemon sert aussi de conteneur-sonde pour une cible headscale :
+      # son netns est le seul endroit d'où Caddy est joignable (le daemon, sur
+      # Tailscale, n'a pas de route vers l'overlay Headscale). Toujours la même
+      # image que ci-dessus, pour ne rien avoir à télécharger.
+      - --probe-image
+      - "${DBOX_IMAGE:-dbox-daemon:local}"
       # Chaînes vides par défaut : sans les deux posées, toute cible qui
       # demanderait public_domain est refusée, exactement comme en CLI.
       - --traefik-network
@@ -273,6 +312,18 @@ services:
       - "${DBOX_TAILNET:?renseigner DBOX_TAILNET dans deploy/.env}"
       - --ts-tag
       - "${DBOX_TSTAG:-tag:dbox}"
+      # Rotation de la clé préauth Headscale, en plus de la clé Tailscale —
+      # active seulement si les quatre sont posés (sinon la tâche est absente,
+      # une machine en Tailscale pur n'a rien à faire ici). Le token d'API
+      # Headscale vit sous secrets/, masqué au daemon comme le token Tailscale.
+      - --headscale-authkey-file
+      - "${DBOX_HEADSCALE_AUTHKEY:-}"
+      - --headscale-api-token-file
+      - "${DBOX_HEADSCALE_API_TOKEN:-${DBOX_HOME:?renseigner DBOX_HOME dans deploy/.env}/secrets/headscale-api-token}"
+      - --headscale-login-server
+      - "${DBOX_HEADSCALE_LOGIN_SERVER:-}"
+      - --headscale-user
+      - "${DBOX_HEADSCALE_USER:-}"
       - --interval
       - "${DBOX_ROTATE_INTERVAL:-86400}"
     user: "${DBOX_UID:-1000}:${DBOX_GID:-1000}"

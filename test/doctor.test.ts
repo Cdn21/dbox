@@ -230,3 +230,62 @@ describe("le diagnostic dans le tableau de bord", () => {
     assert.equal((await route("GET", "/api/diagnostic", {}, deps)).status, 401);
   });
 });
+
+describe("dbox doctor — backend Headscale", () => {
+  const hs = (over: Partial<DoctorDeps> = {}, fichiers: Record<string, string> = {}) =>
+    machine(
+      {
+        backend: "headscale",
+        tailnet: "tailnet.appvc.fr",
+        headscaleLoginServer: "https://headscale.appvc.fr",
+        headscaleCertDir: "/certs",
+        headscaleAuthkeyFile: "/k/hs-authkey",
+        certExpiry: async () => "2027-06-01", // loin
+        ...over,
+      },
+      { "/k/hs-authkey": "hskey-xxx\n", ...fichiers },
+    );
+
+  it("tout en place : serveur, clé et certificat au vert", async () => {
+    const cs = await diagnostic(hs());
+    assert.equal(un(cs, "Headscale").niveau, "ok");
+    assert.equal(un(cs, "Clé Headscale").niveau, "ok");
+    assert.equal(un(cs, "Certificat").niveau, "ok");
+  });
+
+  it("serveur injoignable = bloquant", async () => {
+    const cs = await diagnostic(hs({ probe: async (u) => (u.includes("headscale.appvc.fr") ? null : 200) }));
+    assert.equal(un(cs, "Headscale").niveau, "bloquant");
+  });
+
+  it("clé préauth absente = bloquant", async () => {
+    const cs = await diagnostic(hs({}, { "/k/hs-authkey": "" }));
+    assert.equal(un(cs, "Clé Headscale").niveau, "bloquant");
+  });
+
+  it("certificat absent/illisible = bloquant, avec le nom attendu en correction", async () => {
+    const cs = await diagnostic(hs({ certExpiry: async () => null }));
+    const c = un(cs, "Certificat");
+    assert.equal(c.niveau, "bloquant");
+    assert.match(c.correction ?? "", /tailnet\.appvc\.fr\.crt/);
+  });
+
+  it("certificat proche de l'échéance = attention ; expiré = bloquant", async () => {
+    const proche = await diagnostic(hs({ certExpiry: async () => "2026-10-20" })); // NOW = 2026-10-04
+    assert.equal(un(proche, "Certificat").niveau, "attention");
+    const expire = await diagnostic(hs({ certExpiry: async () => "2026-09-01" }));
+    assert.equal(un(expire, "Certificat").niveau, "bloquant");
+  });
+
+  it("image-sonde absente : certificat non vérifiable, mais pas bloquant", async () => {
+    const cs = await diagnostic(hs({ certExpiry: undefined }));
+    assert.equal(un(cs, "Certificat").niveau, "info");
+  });
+
+  it("backend non headscale : aucun constat Headscale/Certificat", async () => {
+    const cs = await diagnostic(machine()); // backend undefined
+    assert.equal(sujet(cs, "Headscale").length, 0);
+    assert.equal(sujet(cs, "Certificat").length, 0);
+    assert.equal(sujet(cs, "Clé Headscale").length, 0);
+  });
+});

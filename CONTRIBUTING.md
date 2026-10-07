@@ -21,7 +21,7 @@ et se copient à la main si besoin.
 
 ```bash
 export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"   # node n'est PAS dans le PATH d'un shell non interactif
-node --test test/*.test.ts                          # 599 tests, ~700 ms
+node --test test/*.test.ts                          # 644 tests, ~800 ms
 npm run typecheck                                    # tsc --noEmit ; npm install d'abord si node_modules manque
 node src/cli.ts plan examples/budget --tailnet mon-tailnet.ts.net
 node src/cli.ts up <dossier> --target prod          # nécessite Docker + le tailnet
@@ -55,7 +55,7 @@ node src/cli.ts rm <app> --root ... [--target <cible>] [--yes]  # arrête et sup
 | `yaml.ts` | émetteur YAML ; citation conservatrice |
 | `manifest.ts` | `dbox.toml` → manifeste validé ; **les messages d'erreur sont le produit** |
 | `compose.ts` | une cible → objet Compose |
-| `tsserve.ts` | config `tailscale serve` du sidecar |
+| `tsserve.ts` | config `tailscale serve` du sidecar ; et `caddyfileFor` pour le backend headscale |
 | `plan.ts` | manifeste → liste de fichiers (dont `dbox.json`) ; **pur** |
 | `preflight.ts` | ce qui va casser, dit **avant** de construire ; **pur**, et ne refuse jamais |
 | `lecture.ts` | lire un fichier du projet sans risquer de bloquer (fichier ordinaire, taille bornée) |
@@ -63,12 +63,12 @@ node src/cli.ts rm <app> --root ... [--target <cible>] [--yes]  # arrête et sup
 | `writer.ts` | matérialise un plan ; gère `preserveIfExists` |
 | `state.ts` | `state.json` : quelle version est déployée |
 | `tag.ts` | SHA git court, `-sale` si l'arbre est modifié |
-| `doctor.ts` | `dbox doctor` et le panneau Diagnostic : les prérequis de la machine ; **pur**, lecture seule, jamais le token d'API depuis le daemon |
+| `doctor.ts` | `dbox doctor` et le panneau Diagnostic : les prérequis de la machine (dont serveur/clé/**certificat** en backend headscale) ; **pur**, lecture seule, jamais le token d'API depuis le daemon |
 | `doctor-reel.ts` | les effets réels du diagnostic, bornés dans le temps |
 | `version.ts` | `dbox --version` : la version gravée dans l'image, sinon `package.json` |
 | `versions.ts` | lien vers le commit déployé, commits de la source non déployés ; **jamais de `fetch`** |
-| `docker.ts` | appels `docker compose` |
-| `health.ts` | attente active sur l'URL finale |
+| `docker.ts` | appels `docker compose` ; et la sonde de santé d'une cible headscale (IP overlay du sidecar, pas le DNS public) |
+| `health.ts` | attente active sur l'URL finale ; `pinnedHttpProbe` épingle la résolution (équivalent `--resolve`) pour le backend headscale |
 | `up.ts` | orchestration ; **toutes les dépendances externes sont injectées** |
 | `server.ts` | daemon HTTP ; l'aiguillage est **pur**, la glu HTTP est mince |
 | `actions.ts` | start / stop / logs / redéploiement / suppression — les commandes qu'on taperait |
@@ -77,10 +77,12 @@ node src/cli.ts rm <app> --root ... [--target <cible>] [--yes]  # arrête et sup
 | `config.ts` | `~/.config/dbox/config.toml` ; la CLI garde le dernier mot |
 | `env.ts` | le `.env` d'une cible : `CLÉ=valeur`, rien d'autre |
 | `authkey.ts` | avertissement d'expiration ; absent ou mal formé = silence, jamais une erreur |
+| `cert.ts` | expiration du certificat wildcard headscale (lue via conteneur root) ; bannière /settings + doctor |
 | `init.ts` | déduit nom, port et volume du dossier et du Dockerfile |
 | `sources.ts` | clone / pull / fetch-et-compare d'un dépôt — pas de cache maison |
 | `poller.ts` | sondage `auto_deploy` ; jamais de webhook, ça exposerait un port |
 | `tailscale.ts` | appel brut à l'API Tailscale : créer une clé, lister les appareils |
+| `headscale.ts` | appel brut à l'API Headscale : créer/expirer une clé préauth (backend headscale) |
 | `rotate.ts` | régénère la clé si l'échéance approche, révoque l'ancienne ; jamais appelé par le daemon |
 | `orphans.ts` | signale les nœuds `tag:dbox` inactifs depuis longtemps ; rapport seul |
 | `orphans-report.ts` | format du rapport ; écrit par `orphans.ts`, lu par `server.ts` |

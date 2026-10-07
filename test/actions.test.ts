@@ -17,6 +17,7 @@ function entry(): Entry {
       source: "/home/serve/dbox/budget",
       autoDeploy: false,
       publicDomain: null,
+      backend: "tailscale",
       services: [],
     },
     state: null,

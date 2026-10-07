@@ -39,6 +39,7 @@ function entry(
       autoDeploy: false,
       publicDomain: null,
       services: [],
+      backend: "tailscale",
       ...over,
     },
     state,
@@ -1070,6 +1071,25 @@ describe("réglages d'une cible (dbox.toml)", () => {
     assert.match(response.body, /name="autoDeploy"/);
   });
 
+  it("affiche un sélecteur de backend, et enregistre le backend choisi", async () => {
+    const harness = avecManifeste(DEPLOYED);
+    const vue = await route("GET", "/api/apps/budget/prod/manifest", MOI, harness.deps);
+    assert.match(vue.body, /<select name="backend">/);
+    assert.match(vue.body, /<option value="headscale">headscale<\/option>/);
+
+    const save = await route(
+      "POST",
+      "/api/apps/budget/prod/manifest",
+      AGIR,
+      harness.deps,
+      new URLSearchParams(),
+      form({ port: "8080", health: "/", backend: "tailscale" }),
+    );
+    assert.equal(save.status, 200);
+    // backend = "tailscale" (≠ défaut null) → écrit dans le dbox.toml.
+    assert.match(harness.fichiers.get("/home/serve/dbox/budget/dbox.toml")!, /backend = "tailscale"/);
+  });
+
   it("propose la commande et l'auto-déploiement hors du mode deployed", async () => {
     const harness = avecManifeste(
       `name = "budget"\n[targets.dev]\nmode = "devcontainer"\ncommand = "npm run dev"\nport = 5178\n`,
@@ -1586,6 +1606,24 @@ describe("page des réglages", () => {
   it("échappe la version, comme tout ce qui vient de l'extérieur", () => {
     const html = renderSettingsPage("moi", null, null, [], false, null, null, null, NOW, null, "<script>x</script>");
     assert.doesNotMatch(html, /<script>x/);
+  });
+
+  const settingsAvecCert = (cert: { expiresOn: string; daysLeft: number } | null) =>
+    renderSettingsPage("moi", null, null, [], false, null, null, null, NOW, null, null, false, null, null, cert);
+
+  it("certificat headscale loin de l'échéance : simple constat, pas d'avis", () => {
+    const html = settingsAvecCert({ expiresOn: "2027-06-01", daysLeft: 240 });
+    assert.match(html, /Certificat Headscale\s*:\s*expire dans 240 j/);
+    assert.doesNotMatch(html, /class="avis/); // un constat, pas une bannière d'alerte
+  });
+
+  it("certificat headscale proche : avis, et expiré : avis fort", () => {
+    assert.match(settingsAvecCert({ expiresOn: "2026-10-20", daysLeft: 16 }), /class="avis avis-doux"[\s\S]*Certificat wildcard Headscale/);
+    assert.match(settingsAvecCert({ expiresOn: "2026-09-01", daysLeft: -33 }), /class="avis avis-fort"[\s\S]*expiré depuis 33 j/);
+  });
+
+  it("aucun panneau certificat quand il n'y a rien à signaler (backend non headscale)", () => {
+    assert.doesNotMatch(settingsAvecCert(null), /Certificat.*Headscale/);
   });
 });
 
@@ -2317,4 +2355,27 @@ describe("en-têtes de sécurité, sur toute réponse", () => {
       assert.equal(h.get("referrer-policy"), "no-referrer");
     });
   }
+});
+
+describe("panneau Headscale sur /settings", () => {
+  it("absent quand le backend headscale n'est pas configuré", () => {
+    assert.doesNotMatch(renderSettingsPage("moi"), /Backend Headscale/);
+  });
+
+  it("présent, en lecture seule, quand il l'est — et la bannière de clé suit", async () => {
+    const harness = avecActions([]);
+    harness.deps.headscale = async () => ({
+      loginServer: "https://headscale.appvc.fr",
+      certDir: "/certs/dir",
+      authkeyFileConfigured: true,
+    });
+    harness.deps.headscaleAuthkeyNotice = async () => ({ expiresOn: "2026-10-05", daysLeft: 1 });
+    const settings = await route("GET", "/settings", MOI, harness.deps);
+    assert.match(settings.body, /Backend Headscale/);
+    assert.match(settings.body, /headscale\.appvc\.fr/);
+    // Lecture seule : aucun formulaire POST vers un réglage headscale.
+    assert.doesNotMatch(settings.body, /hx-post="[^"]*headscale/);
+    // La clé préauth proche de l'échéance apparaît en bannière.
+    assert.match(settings.body, /Clé préauth Headscale/);
+  });
 });

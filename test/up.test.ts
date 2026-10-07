@@ -223,6 +223,7 @@ public_domain = "budget.exemple.fr"
       autoDeploy: false,
       services: [],
       publicDomain: "budget.exemple.fr",
+      backend: "tailscale",
       ...over,
     };
   }
@@ -459,5 +460,42 @@ dockerfile = "Dockerfile.dev"
       chemins.every((c) => c.startsWith(`${CTX.sourcePath}/`)),
       "les chemins sondés doivent partir du dossier source",
     );
+  });
+});
+
+const HS_DEPLOYED = parseManifest(`
+name = "budget"
+[targets.prod]
+mode = "deployed"
+port = 8080
+backend = "headscale"
+`);
+
+const CTX_HS: Context = {
+  ...CTX,
+  backend: "headscale",
+  headscale: { loginServer: "https://headscale.exemple", certDir: "/certs" },
+};
+
+describe("sonde de santé selon le backend", () => {
+  it("une cible Headscale est sondée par la sonde dédiée (IP du nœud), jamais par le DNS public", async () => {
+    const test = harness({ statuses: [null] }); // le DNS public échouerait…
+    let projetVu: string | null = null;
+    test.deps.headscaleProbe = (project) => {
+      projetVu = project;
+      return async () => 200; // …mais la sonde dédiée répond
+    };
+    const result = await up({ manifest: HS_DEPLOYED, target: "prod", ctx: CTX_HS, tag: "abc" }, test.deps);
+    assert.equal(result.ok, true);
+    assert.equal(projetVu, "dbox-budget-prod");
+  });
+
+  it("une cible Tailscale garde le probe DNS habituel, jamais la sonde Headscale", async () => {
+    const test = harness({ statuses: [200] });
+    test.deps.headscaleProbe = () => {
+      throw new Error("la sonde Headscale ne doit pas servir pour une cible Tailscale");
+    };
+    const result = await up({ manifest: DEPLOYED, target: "prod", ctx: CTX, tag: "abc" }, test.deps);
+    assert.equal(result.ok, true);
   });
 });

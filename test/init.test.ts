@@ -64,6 +64,7 @@ describe("manifeste produit", () => {
       autoDeploy: false,
       tsTag: null,
       sshPort: null,
+      backend: null,
       publicDomain: null,
       services: {},
     });
@@ -144,6 +145,7 @@ describe("squelette pour le formulaire d'ajout", () => {
       health: "/",
       tsTag: null,
       sshPort: null,
+      backend: null,
     });
   });
 
@@ -159,6 +161,7 @@ describe("squelette pour le formulaire d'ajout", () => {
       autoDeploy: false,
       tsTag: null,
       sshPort: null,
+      backend: null,
       publicDomain: null,
       services: {},
     });

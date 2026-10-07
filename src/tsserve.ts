@@ -40,3 +40,22 @@ export function serveConfigFor(upstream: string, sshUpstream: string | null = nu
     },
   };
 }
+
+/**
+ * Caddyfile pour le backend headscale : `tailscale serve` ne sait pas obtenir
+ * de certificat contre un Headscale (pas de `tailscale cert`, voir `backendFor`
+ * dans compose.ts) — Caddy termine le TLS à sa place, avec un certificat
+ * wildcard obtenu ailleurs, jamais par DBox. Le nom du fichier de certificat
+ * suit `tailnet` (le domaine), pas le nom d'hôte : c'est un wildcard, partagé
+ * par toutes les cibles headscale de la machine.
+ */
+export function caddyfileFor(hostname: string, tailnet: string, upstream: string): string {
+  return [
+    "# Généré par DBox — ne pas éditer à la main.",
+    `${hostname}.${tailnet} {`,
+    `\ttls /certs/${tailnet}.crt /certs/${tailnet}.key`,
+    `\treverse_proxy ${upstream}`,
+    `}`,
+    "",
+  ].join("\n");
+}

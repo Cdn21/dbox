@@ -15,7 +15,8 @@
  * Tailscale (voir `tagOwners`).
  */
 
-import { readAuthkeyNotice } from "./authkey.ts";
+import { daysUntil, readAuthkeyNotice } from "./authkey.ts";
+import { certPath } from "./cert.ts";
 import type { TagReport } from "./tag-report.ts";
 
 export type Niveau = "ok" | "attention" | "bloquant" | "info";
@@ -33,6 +34,16 @@ export interface DoctorDeps {
   tsTag: string | null;
   root: string;
   authkeyFile: string | undefined;
+  /** Backend d'exposition par défaut de la machine. Seul « headscale » déclenche
+   * les contrôles spécifiques (serveur, certificat, clé préauth). */
+  backend?: string;
+  headscaleLoginServer?: string;
+  headscaleCertDir?: string;
+  headscaleAuthkeyFile?: string;
+  /** Date d'expiration du certificat wildcard (ISO), `null` si illisible —
+   * passe par un conteneur root (voir `readCertExpiry`). Absente : pas d'image
+   * pour le lire, le contrôle du certificat le signale sans échouer. */
+  certExpiry?: () => Promise<string | null>;
   /** `false` en CLI quand `~/.config/dbox/config.toml` manque ; le daemon,
    * configuré par sa ligne de commande, passe `null` (sans objet). */
   configPresente: boolean | null;
@@ -127,6 +138,9 @@ export async function diagnostic(deps: DoctorDeps): Promise<Constat[]> {
 
   // ── Tag dans tagOwners ───────────────────────────────────────────────────
   await controleTag(deps, ajoute);
+
+  // ── Backend Headscale ──────────────────────────────────────────────────────
+  if (deps.backend === "headscale") await controleHeadscale(deps, ajoute);
 
   // ── Disque ───────────────────────────────────────────────────────────────
   const ecrivable = await deps.ecrivable(deps.root).catch(() => false);
@@ -305,6 +319,108 @@ async function controleTag(deps: DoctorDeps, ajoute: (c: Constat) => void): Prom
           correction: `console Tailscale → Access controls, dans tagOwners : "${tag}": ["autogroup:admin"],`,
         },
   );
+}
+
+/**
+ * Les prérequis propres au backend Headscale, que Tailscale te fournit et que là
+ * tu poses toi-même : le serveur de coordination répond, la clé préauth est là,
+ * et surtout le certificat wildcard existe, est bien nommé et n'expire pas. Un
+ * certificat mal nommé est le piège classique (Caddy attend exactement
+ * `<tailnet>.crt`) : dit ici plutôt que découvert par un déploiement qui échoue.
+ */
+const CERT_WARN_JOURS = 30;
+
+async function controleHeadscale(deps: DoctorDeps, ajoute: (c: Constat) => void): Promise<void> {
+  // ── Serveur de coordination ──
+  const serveur = deps.headscaleLoginServer;
+  if (serveur === undefined || serveur === "") {
+    ajoute({
+      sujet: "Headscale",
+      niveau: "bloquant",
+      message: "backend headscale mais aucun serveur de connexion renseigné",
+      correction: "headscale_login_server dans config.toml, ou --headscale-login-server",
+    });
+  } else {
+    const status = await deps.probe(serveur).catch(() => null);
+    ajoute(
+      status !== null
+        ? { sujet: "Headscale", niveau: "ok", message: `serveur ${serveur} répond` }
+        : {
+            sujet: "Headscale",
+            niveau: "bloquant",
+            message: `serveur ${serveur} injoignable : les sidecars ne pourront pas s'enregistrer`,
+            correction: "vérifier que le serveur Headscale tourne et que cette machine le joint",
+          },
+    );
+  }
+
+  // ── Clé préauth ──
+  const cle = deps.headscaleAuthkeyFile;
+  const contenu = cle === undefined ? null : await deps.readFile(cle).catch(() => null);
+  if (cle === undefined) {
+    ajoute({
+      sujet: "Clé Headscale",
+      niveau: "attention",
+      message: "aucun fichier de clé préauth configuré : chaque nouvelle cible headscale la demandera",
+      correction: "headscale_authkey_file dans config.toml",
+    });
+  } else if (contenu === null || contenu.trim() === "") {
+    ajoute({
+      sujet: "Clé Headscale",
+      niveau: "bloquant",
+      message: `${cle} absent ou vide`,
+      correction: `headscale preauthkeys create --reusable, puis pose la valeur dans ${cle}`,
+    });
+  } else {
+    ajoute({ sujet: "Clé Headscale", niveau: "ok", message: "clé préauth présente" });
+  }
+
+  // ── Certificat wildcard ──
+  const dossier = deps.headscaleCertDir;
+  const nomCert = deps.tailnet === undefined ? "<tailnet>.crt" : certPath(deps.tailnet);
+  if (dossier === undefined || dossier === "") {
+    ajoute({
+      sujet: "Certificat",
+      niveau: "bloquant",
+      message: "aucun dossier de certificat renseigné pour le backend headscale",
+      correction: "headscale_cert_dir dans config.toml (doit contenir <tailnet>.crt et .key)",
+    });
+  } else if (deps.certExpiry === undefined) {
+    ajoute({
+      sujet: "Certificat",
+      niveau: "info",
+      message: `non vérifiable ici (image-sonde non configurée) — attendu : ${dossier}/${nomCert}`,
+    });
+  } else {
+    const expire = await deps.certExpiry().catch(() => null);
+    if (expire === null) {
+      ajoute({
+        sujet: "Certificat",
+        niveau: "bloquant",
+        message: `${dossier}/${nomCert} absent ou illisible : Caddy ne pourra pas terminer le TLS`,
+        correction: `le certificat wildcard doit être exactement nommé ${nomCert} (et ${certPath(deps.tailnet ?? "<tailnet>").replace(/crt$/, "key")}) dans ${dossier}`,
+      });
+    } else {
+      const jours = daysUntil(expire, deps.now());
+      ajoute(
+        jours < 0
+          ? {
+              sujet: "Certificat",
+              niveau: "bloquant",
+              message: `expiré depuis ${-jours} j (${expire}) : toutes les cibles headscale ont perdu leur TLS`,
+              correction: "renouvelle le certificat wildcard (lego/DNS-01)",
+            }
+          : jours <= CERT_WARN_JOURS
+            ? {
+                sujet: "Certificat",
+                niveau: "attention",
+                message: `expire dans ${jours} j (${expire}) : le renouvellement automatique aurait déjà dû passer`,
+                correction: "vérifier le renouvellement du certificat wildcard (lego/DNS-01)",
+              }
+            : { sujet: "Certificat", niveau: "ok", message: `valide jusqu'au ${expire}` },
+      );
+    }
+  }
 }
 
 const SYMBOLES: Record<Niveau, string> = { ok: "✔", attention: "⚠", bloquant: "✘", info: "·" };

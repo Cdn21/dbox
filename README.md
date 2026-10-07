@@ -77,7 +77,7 @@ dbox setup        # writes ~/.config/dbox/config.toml for this machine
 The `dbox` command runs inside a container: Docker is the only thing you need
 on the host. To use the published image instead of building it, pick a
 [release](https://github.com/Cdn21/dbox/releases):
-`DBOX_IMAGE=ghcr.io/cdn21/dbox:1.2.0 ./install.sh` (amd64 and arm64). `dbox setup` asks five questions, in French:
+`DBOX_IMAGE=ghcr.io/cdn21/dbox:1.4.0 ./install.sh` (amd64 and arm64). `dbox setup` asks five questions, in French:
 
 | prompt | meaning | default |
 | --- | --- | --- |
@@ -142,7 +142,7 @@ The daemon runs as UID 1000; set `DBOX_UID`/`DBOX_GID` in `.env` if yours
 differ. By default any identity your tailnet lets reach the node has full
 access; set `DBOX_ALLOWED_USERS` (comma-separated Tailscale logins) in `.env`
 to restrict the dashboard to yourself — recommended, as a second barrier behind
-the tailnet ACL. With a published image, add `DBOX_IMAGE=ghcr.io/cdn21/dbox:1.2.0` to
+the tailnet ACL. With a published image, add `DBOX_IMAGE=ghcr.io/cdn21/dbox:1.4.0` to
 `.env` and `docker pull` it first: DBox never pulls an image implicitly. Every other setting is documented at the top of
 `deploy/docker-compose.yml`.
 

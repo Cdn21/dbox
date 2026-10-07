@@ -7,6 +7,7 @@
  */
 
 import type { AuthkeyNotice } from "../authkey.ts";
+import type { CertNotice } from "../cert.ts";
 import type { MachineEntry } from "../machines.ts";
 import type { OrphansReport } from "../orphans-report.ts";
 import type { TagReport } from "../tag-report.ts";
@@ -25,6 +26,17 @@ import { escape } from "./html.ts";
 export interface TraefikStatus {
   network: string;
   certResolver: string;
+}
+
+/**
+ * Ce que le daemon a chargé au démarrage pour le backend headscale — jamais
+ * éditable depuis ici : le conteneur ne voit ni config.toml ni deploy/.env,
+ * seulement ses arguments de lancement. Un constat, comme le panneau Traefik.
+ */
+export interface HeadscaleStatus {
+  loginServer: string;
+  certDir: string;
+  authkeyFileConfigured: boolean;
 }
 
 export interface SshKeyStatus {
@@ -52,6 +64,9 @@ export function renderSettingsPage(
   traefik: TraefikStatus | null = null,
   version: string | null = null,
   diagnosticDisponible = false,
+  headscale: HeadscaleStatus | null = null,
+  headscaleAuthkeyNotice: AuthkeyNotice | null = null,
+  headscaleCertNotice: CertNotice | null = null,
 ): string {
   return `<!doctype html>
 <html lang="fr">
@@ -70,10 +85,12 @@ ${PWA_HEAD}
   </div>
 </header>
 ${etatMachine([
-  ...authkeyLignes(authkeyItems(authkeyNotice, adminAuthkeyNotice)),
+  ...authkeyLignes(authkeyItems(authkeyNotice, adminAuthkeyNotice, headscaleAuthkeyNotice)),
   orphansLigne(orphansReport, now),
   tagLigne(tagReport, now),
   traefikLigne(traefik),
+  headscaleLigne(headscale),
+  headscaleCertLigne(headscaleCertNotice),
   versionLigne(version),
 ])}
 ${diagnosticDisponible ? diagnosticPanel() : ""}
@@ -134,10 +151,21 @@ interface AuthkeyItem {
   notice: AuthkeyNotice;
   expiredMsg: string;
   okMsg: string;
+  /** Où régénérer — différent pour Tailscale (console web) et Headscale (CLI
+   * sur le serveur qui l'héberge). */
+  hint: string;
 }
 
+const TS_HINT = "Settings → Keys → Generate auth key, puis pose la valeur dans le fichier de clé sur chaque machine.";
+const HEADSCALE_HINT =
+  "headscale preauthkeys create --reusable --expiration 90d (ou laisse le rotator le faire), puis pose la valeur et <fichier>.expires sur chaque machine.";
+
 export
-function authkeyItems(seed: AuthkeyNotice | null, admin: AuthkeyNotice | null): AuthkeyItem[] {
+function authkeyItems(
+  seed: AuthkeyNotice | null,
+  admin: AuthkeyNotice | null,
+  headscale: AuthkeyNotice | null = null,
+): AuthkeyItem[] {
   const items: AuthkeyItem[] = [];
   if (seed !== null) {
     items.push({
@@ -145,6 +173,7 @@ function authkeyItems(seed: AuthkeyNotice | null, admin: AuthkeyNotice | null): 
       notice: seed,
       expiredMsg: "les nouvelles apps ne peuvent plus s'inscrire tant qu'elle n'est pas régénérée.",
       okMsg: "les apps déjà en place ne sont pas affectées ; seules les prochaines app le seront.",
+      hint: TS_HINT,
     });
   }
   if (admin !== null) {
@@ -153,9 +182,48 @@ function authkeyItems(seed: AuthkeyNotice | null, admin: AuthkeyNotice | null): 
       notice: admin,
       expiredMsg: "ce daemon ne pourra plus rejoindre le tailnet à son prochain redémarrage — le tableau de bord deviendrait injoignable.",
       okMsg: "n'affecte que ce daemon, pas les apps qu'il gère.",
+      hint: TS_HINT,
+    });
+  }
+  if (headscale !== null) {
+    items.push({
+      label: "Clé préauth Headscale",
+      notice: headscale,
+      expiredMsg: "les nouvelles apps headscale ne peuvent plus s'inscrire tant qu'elle n'est pas régénérée.",
+      okMsg: "les apps headscale déjà en place ne sont pas affectées ; seules les prochaines le seront.",
+      hint: HEADSCALE_HINT,
     });
   }
   return items;
+}
+
+/**
+ * La bannière du certificat wildcard headscale. Fenêtre d'alerte plus large que
+ * pour une clé (30 j) : un certificat Let's Encrypt se renouvelle d'habitude à
+ * ~30 j de l'échéance, donc en deçà c'est que le renouvellement automatique n'a
+ * pas eu lieu — le moment d'alerter. Son expiration casserait le TLS de **toutes**
+ * les cibles headscale d'un coup, d'où l'avis fort.
+ */
+const CERT_WARN_WITHIN_DAYS = 30;
+
+function headscaleCertLigne(cert: CertNotice | null): Ligne | null {
+  if (cert === null) return null;
+  const expired = cert.daysLeft < 0;
+  const quand = expired
+    ? `expiré depuis ${-cert.daysLeft} j (${escape(cert.expiresOn)})`
+    : cert.daysLeft === 0
+      ? "expire aujourd'hui"
+      : `expire dans ${cert.daysLeft} j (${escape(cert.expiresOn)})`;
+
+  if (!expired && cert.daysLeft > CERT_WARN_WITHIN_DAYS) {
+    return { avis: false, html: `<p class="cle-info">Certificat Headscale : ${quand}.</p>` };
+  }
+  return {
+    avis: true,
+    html: `<div class="avis ${expired ? "avis-fort" : "avis-doux"}">
+  Certificat wildcard Headscale ${quand} — s'il expire, toutes les cibles headscale perdent leur TLS d'un coup.<br>Renouvelle-le (ton script lego/DNS-01) ; Caddy reprend le nouveau fichier sans intervention.
+</div>`,
+  };
 }
 
 function authkeyText(item: AuthkeyItem): { quand: string; consequence: string; expired: boolean } {
@@ -179,7 +247,7 @@ function authkeyBanner(items: AuthkeyItem[]): string {
     .map((item) => {
       const { quand, consequence, expired } = authkeyText(item);
       return `<div class="avis ${expired ? "avis-fort" : "avis-doux"}">
-  ${escape(item.label)} ${quand} — ${consequence}<br>Settings → Keys → Generate auth key, puis pose la valeur dans le fichier de clé sur chaque machine.
+  ${escape(item.label)} ${quand} — ${consequence}<br>${escape(item.hint)}
 </div>`;
     })
     .join("");
@@ -199,7 +267,7 @@ function authkeyLignes(items: AuthkeyItem[]): Ligne[] {
     return {
       avis: true,
       html: `<div class="avis ${expired ? "avis-fort" : "avis-doux"}">
-  ${escape(item.label)} ${quand} — ${consequence}<br>Settings → Keys → Generate auth key, puis pose la valeur dans le fichier de clé sur chaque machine.
+  ${escape(item.label)} ${quand} — ${consequence}<br>${escape(item.hint)}
 </div>`,
     };
   });
@@ -268,6 +336,21 @@ function traefikLigne(status: TraefikStatus | null): Ligne | null {
   Mode public : réseau <code>${escape(status.network)}</code>, resolver
   <code>${escape(status.certResolver)}</code> — une cible n'est exposée que si son
   <code>dbox.toml</code> pose <code>public_domain</code>.
+</p>` };
+}
+
+/**
+ * Lecture seule, comme le panneau Traefik : ces réglages arrivent par la ligne
+ * de commande du conteneur, qui ne peut ni les éditer ni toucher config.toml /
+ * deploy/.env. Absent quand le backend headscale n'est pas configuré ici.
+ */
+function headscaleLigne(status: HeadscaleStatus | null): Ligne | null {
+  if (status === null) return null;
+
+  return { avis: false, html: `<p class="cle-info">
+  Backend Headscale : serveur <code>${escape(status.loginServer)}</code>, certificat dans
+  <code>${escape(status.certDir)}</code>, clé préauth ${status.authkeyFileConfigured ? "configurée" : "<strong>absente</strong>"} —
+  une cible l'emploie si son <code>dbox.toml</code> pose <code>backend = "headscale"</code> (ou le défaut machine).
 </p>` };
 }
 

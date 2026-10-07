@@ -28,6 +28,11 @@ export interface State {
 export interface UpDeps {
   compose: Compose;
   probe: Probe;
+  /** La sonde d'une cible Headscale, bâtie à partir du nom de projet : le DNS
+   * public ne résout pas `<nom>.<tailnet>` vers l'overlay, il faut épingler
+   * l'IP du nœud (voir `headscaleProbe` dans docker.ts). Absente = on retombe
+   * sur `probe` (DNS public), qui échouera et déclenchera un retour arrière. */
+  headscaleProbe?: (project: string) => Probe;
   writeFiles: (files: PlannedFile[]) => Promise<WriteOutcome[]>;
   seedAuthKey: (outcomes: WriteOutcome[], keyFile: string | undefined) => Promise<string | null>;
   readState: (directory: string) => Promise<State | null>;
@@ -49,8 +54,13 @@ export interface UpOptions {
   manifest: Manifest;
   target: string;
   ctx: Context;
-  /** Fichier de clé d'auth, semé dans un `ts.env` nouvellement créé. */
+  /** Fichier de clé d'auth Tailscale, semé dans un `ts.env` nouvellement créé
+   * quand la cible résout au backend "tailscale". */
   authkeyFile?: string;
+  /** Même rôle, pour le backend "headscale" : une clé préauth Headscale n'a
+   * rien à voir avec une clé Tailscale — jamais le même fichier, jamais
+   * interchangeables. */
+  headscaleAuthkeyFile?: string;
   /** Identifiant de cette version — le SHA git, en général. */
   tag: string;
   healthTimeoutMs?: number;
@@ -123,7 +133,8 @@ export async function up(options: UpOptions, deps: UpDeps): Promise<UpResult> {
   for (const outcome of outcomes) {
     if (!outcome.written) deps.log(`  préservé  ${outcome.path}`);
   }
-  const seeded = await deps.seedAuthKey(outcomes, options.authkeyFile);
+  const keyFile = plan.backend === "headscale" ? options.headscaleAuthkeyFile : options.authkeyFile;
+  const seeded = await deps.seedAuthKey(outcomes, keyFile);
   if (seeded !== null) deps.log(`  clé posée ${seeded}`);
 
   // Un compagnon lit ses réglages dans le même `.env` que l'app, et ce fichier
@@ -161,9 +172,21 @@ export async function up(options: UpOptions, deps: UpDeps): Promise<UpResult> {
     return result;
   }
 
-  deps.log(`  vérification de ${plan.healthUrl}…`);
+  // Une cible Headscale ne se sonde pas par le DNS public (il pointe vers une
+  // IP publique, pas vers l'overlay) : on épingle l'IP du nœud. Sans la sonde
+  // dédiée, on retombe sur le DNS public — qui échouera, et ramènera la version
+  // précédente plutôt que de laisser passer un déploiement non vérifié.
+  const probe =
+    plan.backend === "headscale" && deps.headscaleProbe !== undefined
+      ? deps.headscaleProbe(plan.project)
+      : deps.probe;
+  if (plan.backend === "headscale") {
+    deps.log(`  vérification de ${plan.healthUrl} (via l'IP overlay Headscale du nœud)…`);
+  } else {
+    deps.log(`  vérification de ${plan.healthUrl}…`);
+  }
   const health = await waitUntilHealthy(plan.healthUrl, {
-    probe: deps.probe,
+    probe,
     timeoutMs: options.healthTimeoutMs ?? DEFAULT_TIMEOUT_MS,
     intervalMs: options.healthIntervalMs ?? DEFAULT_INTERVAL_MS,
     sleep: deps.sleep,

@@ -12,17 +12,18 @@ import { draft, renderManifest } from "./init.ts";
 import { checkUpstream, clone, isGitRepo, nameFromUrl, pull } from "./sources.ts";
 import { DEFAULT_CONTEXT, type Context, type TraefikConfig } from "./compose.ts";
 import { hostname } from "node:os";
-import { composeRunner, run } from "./docker.ts";
+import { composeRunner, headscaleProbe, run } from "./docker.ts";
 import { avecCache, versionInfo } from "./versions.ts";
 import { versionAffichee, versionDuPaquet } from "./version.ts";
 import { aDesBloquants, diagnostic, formaterTexte } from "./doctor.ts";
 import { effetsReels } from "./doctor-reel.ts";
-import { httpProbe } from "./health.ts";
+import { httpProbe, pinnedHttpProbe } from "./health.ts";
 import { ManifestError, parseManifest, type Manifest } from "./manifest.ts";
 import { planFor, type Plan } from "./plan.ts";
 import { listDescriptors, PS_ARGS, scan, since, type Entry } from "./registry.ts";
 import { addApp, addLocalApp, listWorkspaces, redeploy, removeTarget, resolveWorkspacePath } from "./actions.ts";
 import { readAuthkeyNotice } from "./authkey.ts";
+import { certExpiryFromPem, certNotice, readCertExpiry, type CertNotice } from "./cert.ts";
 import { lireSiFichierOrdinaire } from "./lecture.ts";
 import { Jobs } from "./jobs.ts";
 import { startPolling } from "./poller.ts";
@@ -30,12 +31,13 @@ import { checkOrphansOnce, STALE_AFTER_DAYS, startCheckingOrphans } from "./orph
 import { readOrphansReport } from "./orphans-report.ts";
 import { checkTagOnce, startCheckingTag } from "./tagcheck.ts";
 import { readTagReport } from "./tag-report.ts";
-import { rotateOnce, startRotating } from "./rotate.ts";
+import { rotateHeadscaleOnce, rotateOnce, startRotating, startRotatingHeadscale } from "./rotate.ts";
 import { createServer } from "./server.ts";
 import { readState, writeState } from "./state.ts";
 import { appKeyFile, ensureKey, keyPaths, readPublicKey, resolveKeyFile } from "./sshkey.ts";
 import { readMachines, writeMachines } from "./machines.ts";
 import { createAuthKey, listDevices, listTagOwners, revokeAuthKey } from "./tailscale.ts";
+import { createPreAuthKey, expirePreAuthKey } from "./headscale.ts";
 import { sourceTag } from "./tag.ts";
 import { TomlError } from "./toml.ts";
 import { up } from "./up.ts";
@@ -63,6 +65,11 @@ const USAGE = `dbox <setup|add|init|plan|up|rm|ls|serve|rotate-authkey> [dossier
   --tailnet <nom>   domaine du tailnet (défaut $DBOX_TAILNET)
   --tag <tag>       version à déployer (défaut : le SHA git des sources)
   --ts-tag <tag>    tag ACL des nœuds (défaut ${DEFAULT_CONTEXT.tsTag}) ; vide pour n'en annoncer aucun
+  --backend <nom>   backend d'exposition par défaut : tailscale ou headscale (défaut tailscale)
+  --headscale-login-server <url>   URL du serveur Headscale (--login-server du sidecar)
+  --headscale-cert-dir <chemin>    dossier hôte du certificat wildcard <tailnet>.crt/.key
+  --headscale-authkey-file <f>     clé préauth Headscale, semée dans les cibles headscale
+  --probe-image <ref>              image (celle du daemon) pour sonder la santé d'une cible headscale
   --traefik-network <nom>        réseau Docker externe du Traefik de cette machine (mode public)
   --traefik-cert-resolver <nom>  resolver ACME de ce Traefik (mode public)
   --timeout <s>     délai du contrôle de santé (défaut 180)
@@ -74,6 +81,8 @@ const USAGE = `dbox <setup|add|init|plan|up|rm|ls|serve|rotate-authkey> [dossier
   --authkey-file <f> clé d'auth semée dans chaque nouvelle cible
   --admin-authkey-file <f> (serve) marqueur d'échéance de la clé du daemon (défaut : à côté de --authkey-file)
   --api-token-file <f> (rotate-authkey) token d'accès API Tailscale (défaut : à côté de --authkey-file)
+  --headscale-api-token-file <f>  (rotate-authkey) token d'API Headscale, pour la rotation de sa clé préauth
+  --headscale-user <id>           (rotate-authkey) ID NUMÉRIQUE du user Headscale (ex. 1 ; pas son nom)
   --orphans-report-file <f> rapport des nœuds abandonnés, écrit par rotate-authkey, lu par serve (défaut : à côté de --authkey-file)
   --tag-report-file <f> rapport de présence de --ts-tag dans tagOwners, écrit par rotate-authkey, lu par serve (défaut : à côté de --authkey-file)
   --interval <s>    (rotate-authkey) tourne en continu à cet intervalle, au lieu d'une passe unique
@@ -100,6 +109,17 @@ interface Options {
   tailnet: string;
   tag?: string;
   tsTag: string | null;
+  /** Backend d'exposition par défaut de la machine ("tailscale"/"headscale"). */
+  backend: string;
+  headscaleLoginServer?: string;
+  headscaleCertDir?: string;
+  headscaleAuthkeyFile?: string;
+  headscaleApiTokenFile?: string;
+  headscaleUser?: string;
+  /** Image (celle du daemon) servant à sonder une cible headscale depuis le
+   * netns de son sidecar — voir `headscaleProbe`. Absente : pas de sonde
+   * headscale, donc on retombe sur le DNS public (qui échoue). */
+  probeImage?: string;
   /** Les deux se posent ensemble ou pas du tout — sans eux, une cible qui
    * demande `public_domain` est refusée, jamais routée vers un Traefik deviné. */
   traefikNetwork?: string;
@@ -155,6 +175,24 @@ async function main(argv: string[]): Promise<number> {
   if (command === "--version" || command === "-v") {
     process.stdout.write(`dbox ${versionAffichee(process.env["DBOX_VERSION"], versionDuPaquet())}\n`);
     return 0;
+  }
+  // Commande cachée : la sonde de santé d'une cible headscale. Lancée dans le
+  // netns du sidecar de la cible (voir `headscaleProbe`), elle interroge Caddy
+  // sur 127.0.0.1 avec le nom en SNI. Hors USAGE : ce n'est pas une commande
+  // destinée à être tapée à la main, juste le point d'entrée du conteneur-sonde.
+  if (command === "__probe") {
+    const status = await pinnedHttpProbe("127.0.0.1")(argv[1] ?? "");
+    process.stdout.write(status === null ? "null" : String(status));
+    return status === null ? 1 : 0;
+  }
+  // Commande cachée jumelle : la date d'expiration du certificat wildcard
+  // headscale. Lancée dans un conteneur root qui monte le dossier (le daemon,
+  // 1000:1000, ne peut pas lire un 0600 root) — voir `readCertExpiry`.
+  if (command === "__certexpiry") {
+    const pem = await readFile(argv[1] ?? "", "utf8").catch(() => null);
+    const iso = pem === null ? null : certExpiryFromPem(pem);
+    process.stdout.write(iso ?? "null");
+    return iso === null ? 1 : 0;
   }
   if (!["setup", "doctor", "add", "init", "plan", "up", "rm", "ls", "serve", "rotate-authkey"].includes(command)) {
     process.stderr.write(`commande inconnue « ${command} »\n\n${USAGE}`);
@@ -252,6 +290,42 @@ function traefikConfigFor(options: Options): TraefikConfig | null {
   return { network: options.traefikNetwork, certResolver: options.traefikCertResolver };
 }
 
+/** Backend résolu + réglages headscale pour le Context — les deux réglages
+ * headscale se posent ensemble ou pas du tout (sinon « headscale » est un
+ * refus, jamais un défaut deviné), exactement comme les deux réglages Traefik. */
+function backendCtxFor(options: Options): Pick<Context, "backend" | "headscale"> {
+  // Validé ici, pas seulement au parse de `--backend` : `backend` peut aussi
+  // venir de `config.toml`, qui n'a pas de contrôle d'énumération. Sans ça, un
+  // `backend = "headscal"` mal tapé retomberait en silence sur tailscale —
+  // l'app sortirait par le mauvais backend sans un mot (esprit de l'invariant 15).
+  if (options.backend !== "tailscale" && options.backend !== "headscale") {
+    throw new Error(`backend inconnu « ${options.backend} » — attendu « tailscale » ou « headscale »`);
+  }
+  const backend = options.backend;
+  const headscale =
+    options.headscaleLoginServer === undefined || options.headscaleCertDir === undefined
+      ? null
+      : { loginServer: options.headscaleLoginServer, certDir: options.headscaleCertDir };
+  return { backend, headscale };
+}
+
+/** Met en cache le résultat d'une lecture coûteuse pendant `ttlMs` — la lecture
+ * du certificat passe par un conteneur, inutile de la refaire à chaque
+ * affichage de /settings alors que la date bouge sur des mois. */
+function cacheExpiration(lire: () => Promise<string | null>, ttlMs: number): () => Promise<string | null> {
+  let jamais = true;
+  let echeance = 0;
+  let valeur: string | null = null;
+  return async () => {
+    const maintenant = Date.now();
+    if (!jamais && maintenant < echeance) return valeur;
+    valeur = await lire().catch(() => null);
+    echeance = maintenant + ttlMs;
+    jamais = false;
+    return valeur;
+  };
+}
+
 function contextFor(options: Options, directory: string): Context {
   return {
     ...DEFAULT_CONTEXT,
@@ -259,6 +333,7 @@ function contextFor(options: Options, directory: string): Context {
     tailnet: options.tailnet,
     tsTag: options.tsTag,
     traefik: traefikConfigFor(options),
+    ...backendCtxFor(options),
     uid: process.getuid?.() ?? 1000,
     gid: process.getgid?.() ?? 1000,
     sourcePath: directory,
@@ -330,12 +405,22 @@ async function runUp(
   const log = (line: string) => process.stdout.write(`${line}\n`);
 
   const result = await up(
-    { manifest, target, ctx, tag, healthTimeoutMs: options.timeoutMs, authkeyFile: options.authkeyFile },
+    {
+      manifest,
+      target,
+      ctx,
+      tag,
+      healthTimeoutMs: options.timeoutMs,
+      authkeyFile: options.authkeyFile,
+      headscaleAuthkeyFile: options.headscaleAuthkeyFile,
+    },
     {
       compose: composeRunner((line) => {
         if (line.trim() !== "") log(`  │ ${line}`);
       }),
       probe: httpProbe,
+      headscaleProbe:
+        options.probeImage === undefined ? undefined : (project) => headscaleProbe(project, options.probeImage!),
       writeFiles,
       seedAuthKey,
       readState,
@@ -503,6 +588,16 @@ async function runDoctor(options: Options): Promise<number> {
     root: options.root,
     authkeyFile: options.authkeyFile,
     configPresente,
+    backend: options.backend,
+    headscaleLoginServer: options.headscaleLoginServer,
+    headscaleCertDir: options.headscaleCertDir,
+    headscaleAuthkeyFile: options.headscaleAuthkeyFile,
+    // Lecture directe (pas de daemon à ménager ici) : un conteneur root lit le
+    // certificat, à condition que le backend soit headscale et l'image posée.
+    certExpiry:
+      options.backend === "headscale" && options.headscaleCertDir !== undefined && options.probeImage !== undefined && tailnet !== undefined
+        ? () => readCertExpiry(options.headscaleCertDir!, tailnet, options.probeImage!)
+        : undefined,
     tagReport: tagFile === undefined ? async () => null : () => readTagReport(tagFile, (p) => readFile(p, "utf8")),
     tagOwners,
   });
@@ -686,9 +781,39 @@ async function runRotateAuthkey(options: Options): Promise<number> {
     log,
   };
 
+  // Rotation de la clé préauth Headscale — seulement si tout est configuré
+  // pour ce backend (fichier de clé, token d'API, user, serveur). Absente
+  // sinon : une machine en Tailscale pur n'a rien à faire ici.
+  const headscaleRotateDeps =
+    options.headscaleAuthkeyFile !== undefined &&
+    options.headscaleApiTokenFile !== undefined &&
+    options.headscaleUser !== undefined &&
+    options.headscaleLoginServer !== undefined
+      ? {
+          authkeyFile: options.headscaleAuthkeyFile,
+          loginServer: options.headscaleLoginServer,
+          user: options.headscaleUser,
+          readFile: (path: string) => readFile(path, "utf8"),
+          writeFile: write,
+          // Son propre token, jamais celui de Tailscale — vit dans secrets/,
+          // même masquage au daemon que le token Tailscale.
+          readToken: () =>
+            readFile(options.headscaleApiTokenFile!, "utf8").catch((error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return "";
+              throw error;
+            }),
+          createKey: createPreAuthKey,
+          expireKey: expirePreAuthKey,
+          now: Date.now,
+          log,
+        }
+      : null;
+
   if (options.rotateIntervalMs === undefined) {
     let failed = false;
-    for (const task of [() => rotateOnce(rotateDeps), () => checkOrphansOnce(orphanDeps), () => checkTagOnce(tagDeps)]) {
+    const taches = [() => rotateOnce(rotateDeps), () => checkOrphansOnce(orphanDeps), () => checkTagOnce(tagDeps)];
+    if (headscaleRotateDeps !== null) taches.push(() => rotateHeadscaleOnce(headscaleRotateDeps));
+    for (const task of taches) {
       try {
         await task();
       } catch (error) {
@@ -705,6 +830,7 @@ async function runRotateAuthkey(options: Options): Promise<number> {
   startRotating(options.rotateIntervalMs, rotateDeps);
   startCheckingOrphans(options.rotateIntervalMs, orphanDeps);
   startCheckingTag(options.rotateIntervalMs, tagDeps);
+  if (headscaleRotateDeps !== null) startRotatingHeadscale(options.rotateIntervalMs, headscaleRotateDeps);
   return new Promise(() => {}); // ne se termine jamais, comme `serve`
 }
 
@@ -716,6 +842,7 @@ function runServe(options: Options): Promise<number> {
     tailnet: options.tailnet,
     tsTag: options.tsTag,
     traefik: traefikConfigFor(options),
+    ...backendCtxFor(options),
     uid: process.getuid?.() ?? 1000,
     gid: process.getgid?.() ?? 1000,
     // Écrasé pour chaque cible par le chemin lu dans son dbox.json.
@@ -768,11 +895,43 @@ function runServe(options: Options): Promise<number> {
       ? undefined
       : () => listWorkspaces(workspacesRoot, (p) => readdir(p, { withFileTypes: true }), (p) => readFile(p, "utf8"));
 
+  // Expiration du certificat wildcard headscale, en lecture seule, pour la
+  // bannière de /settings. Lire le certificat demande un conteneur root (voir
+  // readCertExpiry) : trop coûteux à chaque affichage, et la date bouge sur des
+  // mois — on la met donc en cache quelques heures. Absente sans backend
+  // headscale configuré, ou sans image-sonde pour lire le certificat.
+  const certReader =
+    ctx.headscale === null || options.probeImage === undefined || options.tailnet === undefined
+      ? undefined
+      : cacheExpiration(
+          () => readCertExpiry(ctx.headscale!.certDir, options.tailnet!, options.probeImage!),
+          6 * 60 * 60 * 1000,
+        );
+
   const server = createServer({
     scan: scanRoot,
     now: Date.now,
     authkeyNotice: () => readAuthkeyNotice(options.authkeyFile, (p) => readFile(p, "utf8"), Date.now()),
+    headscaleCertNotice:
+      certReader === undefined
+        ? undefined
+        : async (): Promise<CertNotice | null> => {
+            const iso = await certReader();
+            return iso === null ? null : certNotice(iso, Date.now());
+          },
     adminAuthkeyNotice: () => readAuthkeyNotice(options.adminAuthkeyFile, (p) => readFile(p, "utf8"), Date.now()),
+    headscaleAuthkeyNotice: () =>
+      readAuthkeyNotice(options.headscaleAuthkeyFile, (p) => readFile(p, "utf8"), Date.now()),
+    // Statut lecture seule du backend headscale — absent si non configuré ici,
+    // même règle que le panneau Traefik (ctx.headscale posé par backendCtxFor).
+    headscale:
+      ctx.headscale === null
+        ? undefined
+        : async () => ({
+            loginServer: ctx.headscale!.loginServer,
+            certDir: ctx.headscale!.certDir,
+            authkeyFileConfigured: options.headscaleAuthkeyFile !== undefined,
+          }),
     orphansReport:
       options.orphansReportFile === undefined
         ? undefined
@@ -803,6 +962,13 @@ function runServe(options: Options): Promise<number> {
         root: options.root,
         authkeyFile: options.authkeyFile,
         configPresente: null,
+        backend: options.backend,
+        headscaleLoginServer: options.headscaleLoginServer,
+        headscaleCertDir: options.headscaleCertDir,
+        headscaleAuthkeyFile: options.headscaleAuthkeyFile,
+        // Réutilise le lecteur mis en cache de la bannière : pas un second
+        // conteneur à chaque diagnostic.
+        certExpiry: certReader,
         tagReport:
           options.tagReportFile === undefined
             ? async () => null
@@ -878,6 +1044,8 @@ function deployOptions(options: Options, ctx: Context) {
     ctx,
     timeoutMs: options.timeoutMs,
     authkeyFile: options.authkeyFile,
+    headscaleAuthkeyFile: options.headscaleAuthkeyFile,
+    probeImage: options.probeImage,
     sshKeyFile: options.sshKeyFile,
     sources: options.sources,
     defaultTarget: options.defaultTarget,
@@ -939,6 +1107,13 @@ function parseArgs(args: string[], config: Config = {}): Options {
     root: config.root ?? DEFAULT_CONTEXT.root,
     tailnet: config.tailnet ?? process.env["DBOX_TAILNET"] ?? "<tailnet>.ts.net",
     tsTag: config.tsTag ?? DEFAULT_CONTEXT.tsTag,
+    backend: config.backend ?? DEFAULT_CONTEXT.backend,
+    headscaleLoginServer: config.headscaleLoginServer,
+    headscaleCertDir: config.headscaleCertDir,
+    headscaleAuthkeyFile: config.headscaleAuthkeyFile,
+    headscaleApiTokenFile: config.headscaleApiTokenFile,
+    headscaleUser: config.headscaleUser,
+    probeImage: config.probeImage,
     traefikNetwork: config.traefikNetwork,
     traefikCertResolver: config.traefikCertResolver,
     authkeyFile: config.authkeyFile,
@@ -1001,6 +1176,46 @@ function parseArgs(args: string[], config: Config = {}): Options {
         // Chaîne vide = ne rien annoncer, tant que `tagOwners` n'est pas déclaré.
         const value = expect(args, ++i, arg);
         options.tsTag = value === "" ? null : value;
+        break;
+      }
+      case "--backend": {
+        const value = expect(args, ++i, arg);
+        if (value !== "tailscale" && value !== "headscale") {
+          throw new Error(`--backend attend « tailscale » ou « headscale » (reçu « ${value} »)`);
+        }
+        options.backend = value;
+        break;
+      }
+      // Chaîne vide = non renseigné, même idiome que --traefik-network : le
+      // passage par deploy/docker-compose.yml pose toujours la variable.
+      case "--headscale-login-server": {
+        const value = expect(args, ++i, arg);
+        options.headscaleLoginServer = value === "" ? undefined : value;
+        break;
+      }
+      case "--headscale-cert-dir": {
+        const value = expect(args, ++i, arg);
+        options.headscaleCertDir = value === "" ? undefined : value;
+        break;
+      }
+      case "--headscale-authkey-file": {
+        const value = expect(args, ++i, arg);
+        options.headscaleAuthkeyFile = value === "" ? undefined : value;
+        break;
+      }
+      case "--headscale-api-token-file": {
+        const value = expect(args, ++i, arg);
+        options.headscaleApiTokenFile = value === "" ? undefined : value;
+        break;
+      }
+      case "--headscale-user": {
+        const value = expect(args, ++i, arg);
+        options.headscaleUser = value === "" ? undefined : value;
+        break;
+      }
+      case "--probe-image": {
+        const value = expect(args, ++i, arg);
+        options.probeImage = value === "" ? undefined : value;
         break;
       }
       // Chaîne vide = non renseigné, même idiome que --workspaces-root : le

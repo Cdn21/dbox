@@ -26,6 +26,7 @@ import { createServer as createHttpServer, type IncomingMessage, type ServerResp
 import type { Compose, RunResult } from "./docker.ts";
 import { track, type Jobs } from "./jobs.ts";
 import type { VersionInfo } from "./versions.ts";
+import type { CertNotice } from "./cert.ts";
 import type { Constat } from "./doctor.ts";
 import {
   apercuManifeste,
@@ -65,6 +66,7 @@ import {
   type JobView,
   renderSettingsPage,
   sshKeyPanel,
+  type HeadscaleStatus,
   type TraefikStatus,
 } from "./ui/index.ts";
 import { ACTION_HEADER, IDENTITY_HEADERS } from "./protocol.ts";
@@ -124,6 +126,15 @@ export interface Deps {
   /** Les réglages du mode public reçus au démarrage — `undefined` : non
    * configuré sur cette machine, le panneau reste absent de /settings. */
   traefik?: TraefikStatus;
+  /** Réglages headscale reçus au démarrage — `undefined` : backend headscale
+   * non configuré ici, le panneau reste absent de /settings. */
+  headscale?: () => Promise<HeadscaleStatus | null>;
+  /** Échéance de la clé préauth Headscale (`<fichier>.expires`) — même
+   * mécanisme que la clé Tailscale. `undefined` : rien à signaler. */
+  headscaleAuthkeyNotice?: () => Promise<AuthkeyNotice | null>;
+  /** Échéance du certificat wildcard headscale (lue dans le certificat, pas un
+   * `.expires`) — `undefined` : backend non headscale, ou rien à signaler. */
+  headscaleCertNotice?: () => Promise<CertNotice | null>;
   /** Version gravée dans l'image à la construction (`$DBOX_VERSION`) —
    * `undefined` : rien à afficher, comme les autres renseignements. */
   version?: string;
@@ -226,6 +237,7 @@ export async function route(
           adminNotice,
           await extrasPour(entries, deps),
           { orphans, tag: tagReport },
+          deps.headscaleAuthkeyNotice === undefined ? null : await deps.headscaleAuthkeyNotice(),
         ),
       );
     }
@@ -253,6 +265,9 @@ export async function route(
           deps.traefik ?? null,
           deps.version ?? null,
           deps.diagnostic !== undefined,
+          deps.headscale === undefined ? null : await deps.headscale(),
+          deps.headscaleAuthkeyNotice === undefined ? null : await deps.headscaleAuthkeyNotice(),
+          deps.headscaleCertNotice === undefined ? null : await deps.headscaleCertNotice(),
         ),
       );
     }
@@ -624,6 +639,9 @@ async function saveManifestRoute(entry: Entry, body: string, actions: Actions): 
   };
 
   changes.tsTag = optionnel("tsTag");
+  // Le backend vit sur toutes les cibles (y compris workspace). Vide =
+  // null = défaut machine. writeManifestTarget re-valide (tailscale/headscale).
+  changes.backend = optionnel("backend");
 
   if (current.mode === "devcontainer") {
     // `image` a un défaut, pas `dockerfile` : vider le premier le rétablit,

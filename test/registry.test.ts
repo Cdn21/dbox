@@ -63,6 +63,7 @@ async function fixture(): Promise<string> {
     source: "/home/serve/dbox/budget",
     autoDeploy: false,
     publicDomain: null,
+    backend: "tailscale",
     services: [],
   };
   await mkdir(join(root, "budget", "prod"), { recursive: true });

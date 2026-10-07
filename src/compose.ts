@@ -6,7 +6,7 @@
  * réseau du projet. Un test garde cet invariant.
  */
 
-import { hostnameFor, type CompanionService, type Manifest, type Target } from "./manifest.ts";
+import { hostnameFor, type Backend, type CompanionService, type Manifest, type Target } from "./manifest.ts";
 import type { YamlMap } from "./yaml.ts";
 
 export interface Context {
@@ -36,6 +36,26 @@ export interface Context {
    * qui le demanderait est refusée, jamais routée vers un Traefik deviné.
    */
   traefik: TraefikConfig | null;
+  /** Backend d'exposition par défaut de la machine — une cible peut le
+   * redéfinir (`target.backend`), comme `tsTag`. */
+  backend: Backend;
+  /** Réglages headscale de la machine — `null` tant qu'aucune cible ne les
+   * utilise (et alors `backend = "headscale"` est un refus, pas un défaut deviné). */
+  headscale: HeadscaleConfig | null;
+  /** Image du service Caddy en backend headscale — miroir de `tailscaleImage`. */
+  caddyImage: string;
+}
+
+/**
+ * Ce qu'il faut pour parler à un Headscale : l'URL du serveur de coordination
+ * (`--login-server` du sidecar), et le dossier hôte du certificat wildcard du
+ * tailnet (`<tailnet>.crt`/`<tailnet>.key`), obtenu une fois, à la main, par
+ * DNS-01 — jamais par DBox, `tailscale cert` n'a pas d'équivalent contre
+ * Headscale (voir `caddyService`).
+ */
+export interface HeadscaleConfig {
+  loginServer: string;
+  certDir: string;
 }
 
 /**
@@ -59,7 +79,34 @@ export const DEFAULT_CONTEXT: Omit<Context, "sourcePath" | "tailnet" | "uid" | "
   imageTag: "dev",
   tailscaleImage: "tailscale/tailscale:stable",
   traefik: null,
+  backend: "tailscale",
+  headscale: null,
+  caddyImage: "caddy:2",
 };
+
+/**
+ * Résout le backend d'une cible (redéfinition locale, sinon le défaut de la
+ * machine), et refuse tout de suite ce qui ne pourrait jamais fonctionner —
+ * avant d'écrire quoi que ce soit, pas après. Même esprit que le refus de
+ * `public_domain` sans Traefik.
+ */
+export function backendFor(target: Target, ctx: Context, targetName: string): Backend {
+  const backend = target.backend ?? ctx.backend;
+  if (backend === "headscale" && ctx.headscale === null) {
+    throw new Error(
+      `cible « ${targetName} » : backend = "headscale" mais aucun réglage headscale n'est configuré sur ` +
+        `cette machine — pose headscale_login_server et headscale_cert_dir (config.toml ou ` +
+        `--headscale-login-server / --headscale-cert-dir)`,
+    );
+  }
+  if (backend === "headscale" && target.sshPort !== null) {
+    throw new Error(
+      `cible « ${targetName} » : ssh_port n'est pas pris en charge avec backend = "headscale" pour l'instant ` +
+        `(caddy:2 n'a pas d'équivalent à TCPForward) — retire ssh_port ou repasse en backend = "tailscale"`,
+    );
+  }
+  return backend;
+}
 
 /**
  * Une image que DBox construit ne se télécharge jamais. Sans ça, Compose tente
@@ -123,6 +170,7 @@ export function composeFor(manifest: Manifest, targetName: string, ctx: Context)
   const target = manifest.targets[targetName];
   if (target === undefined) throw new Error(`cible « ${targetName} » inconnue`);
 
+  const backend = backendFor(target, ctx, targetName);
   const project = projectName(manifest.name, targetName);
   const hostname = hostnameFor(manifest.name, targetName);
   const network = `${project}_internal`;
@@ -142,7 +190,10 @@ export function composeFor(manifest: Manifest, targetName: string, ctx: Context)
   }
   // Le sidecar ne change jamais quand la cible devient publique : l'exposition
   // est additive, l'accès privé par le tailnet reste là même si le public casse.
-  services["tailscale"] = tailscaleService(hostname, target, ctx, app !== undefined);
+  services["tailscale"] = tailscaleService(hostname, target, ctx, app !== undefined, backend);
+  // Backend headscale : un Caddy voisin termine le TLS à la place de
+  // `tailscale serve` (pas de `tailscale cert` contre Headscale).
+  if (backend === "headscale") services["caddy"] = caddyService(ctx);
 
   const volumes: YamlMap = { "ts-state": {} };
   // Volume **nommé** et non anonyme : un volume anonyme disparaît au premier
@@ -296,19 +347,40 @@ function tailscaleService(
   target: Target,
   ctx: Context,
   hasApp: boolean,
+  backend: Backend,
 ): YamlMap {
   const environment: YamlMap = {
     TS_HOSTNAME: hostname,
     TS_STATE_DIR: "/var/lib/tailscale",
-    // Mode userspace : ni NET_ADMIN, ni /dev/net/tun.
-    TS_USERSPACE: "true",
-    TS_SERVE_CONFIG: "/config/serve.json",
   };
+  const extraArgs: string[] = [];
+
+  if (backend === "headscale") {
+    // Pas userspace ici : Caddy (network_mode: service:tailscale, voir
+    // caddyService) doit pouvoir se lier à la vraie interface tailscale0 pour
+    // obtenir la vraie IP du tailnet — impossible en mode userspace.
+    environment["TS_USERSPACE"] = "false";
+    // ctx.headscale non-null garanti par backendFor().
+    extraArgs.push(`--login-server=${ctx.headscale!.loginServer}`);
+  } else {
+    // Mode userspace : ni NET_ADMIN, ni /dev/net/tun.
+    environment["TS_USERSPACE"] = "true";
+    environment["TS_SERVE_CONFIG"] = "/config/serve.json";
+  }
+
   // La cible peut porter son propre tag, pour s'isoler des autres apps de la
   // machine derrière une policy distincte — sinon celui de la machine.
   const tag = target.tsTag ?? ctx.tsTag;
   if (tag !== null) {
-    environment["TS_EXTRA_ARGS"] = `--advertise-tags=${tag}`;
+    extraArgs.push(`--advertise-tags=${tag}`);
+  }
+  if (extraArgs.length > 0) {
+    environment["TS_EXTRA_ARGS"] = extraArgs.join(" ");
+  }
+
+  const volumes = ["ts-state:/var/lib/tailscale"];
+  if (backend === "tailscale") {
+    volumes.push("./serve.json:/config/serve.json:ro");
   }
 
   const service: YamlMap = {
@@ -316,11 +388,16 @@ function tailscaleService(
     hostname,
     env_file: ["./ts.env"],
     environment,
-    volumes: ["ts-state:/var/lib/tailscale", "./serve.json:/config/serve.json:ro"],
+    volumes,
     restart: "unless-stopped",
     networks: ["internal"],
   };
 
+  if (backend === "headscale") {
+    // Interface réseau réelle (pas userspace) : demande ces deux droits.
+    service["cap_add"] = ["NET_ADMIN", "NET_RAW"];
+    service["devices"] = ["/dev/net/tun"];
+  }
   if (target.mode === "workspace") {
     service["extra_hosts"] = ["host.docker.internal:host-gateway"];
   }
@@ -329,4 +406,23 @@ function tailscaleService(
   }
 
   return service;
+}
+
+/**
+ * Remplace TS_SERVE_CONFIG + ${TS_CERT_DOMAIN} pour le backend headscale :
+ * partage le netns de `tailscale` (donc sa vraie IP tailnet) et termine le TLS
+ * avec le certificat wildcard de la machine, au lieu de `tailscale cert` —
+ * absent de Headscale. `ctx.headscale` est garanti non-null ici, `backendFor()`
+ * a déjà refusé sinon.
+ */
+function caddyService(ctx: Context): YamlMap {
+  return {
+    image: ctx.caddyImage,
+    network_mode: "service:tailscale",
+    depends_on: ["tailscale"],
+    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", `${ctx.headscale!.certDir}:/certs:ro`],
+    restart: "unless-stopped",
+    // Pas de `networks:` ici : Compose refuse network_mode et networks
+    // ensemble sur le même service.
+  };
 }

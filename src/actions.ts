@@ -7,7 +7,7 @@
  */
 
 import type { Context } from "./compose.ts";
-import type { Compose, RunResult } from "./docker.ts";
+import { headscaleProbe, type Compose, type RunResult } from "./docker.ts";
 import { parseEnv, serializeEnv, type EnvEntry } from "./env.ts";
 import { httpProbe } from "./health.ts";
 import { draft, nameFromDirectory, renderManifest, renderScaffold, targetNameFor, type NewTargetMode } from "./init.ts";
@@ -195,6 +195,11 @@ export interface DeployOptions {
   ctx: Context;
   timeoutMs: number;
   authkeyFile?: string;
+  /** Clé préauth Headscale — voir `UpOptions.headscaleAuthkeyFile`, jamais la même clé. */
+  headscaleAuthkeyFile?: string;
+  /** Image (celle du daemon) servant de conteneur-sonde pour une cible
+   * headscale — voir `headscaleProbe`. Absente : pas de sonde headscale. */
+  probeImage?: string;
   /** Clé SSH dédiée aux clonages — `undefined` : on retombe sur `~/.ssh`. */
   sshKeyFile?: string;
   readManifest: (path: string) => Promise<string>;
@@ -493,11 +498,14 @@ async function deployFrom(
       ctx: { ...options.ctx, sourcePath: source },
       tag,
       authkeyFile: options.authkeyFile,
+      headscaleAuthkeyFile: options.headscaleAuthkeyFile,
       healthTimeoutMs: options.timeoutMs,
     },
     {
       compose,
       probe: httpProbe,
+      headscaleProbe:
+        options.probeImage === undefined ? undefined : (project) => headscaleProbe(project, options.probeImage!),
       writeFiles,
       seedAuthKey,
       readState,

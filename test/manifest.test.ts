@@ -38,6 +38,7 @@ describe("manifeste valide", () => {
       health: "/",
       tsTag: null,
       sshPort: null,
+      backend: null,
     });
     assert.deepEqual(manifest.targets["prod"], {
       mode: "deployed",
@@ -48,6 +49,7 @@ describe("manifeste valide", () => {
       autoDeploy: false,
       tsTag: null,
       sshPort: null,
+      backend: null,
       publicDomain: null,
       services: {},
     });
@@ -69,6 +71,7 @@ describe("manifeste valide", () => {
       autoDeploy: false,
       tsTag: null,
       sshPort: null,
+      backend: null,
       publicDomain: null,
       services: {},
     });

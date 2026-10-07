@@ -5,9 +5,9 @@
  * C'est `cli.ts --write` qui décide, plus tard, de matérialiser un plan.
  */
 
-import { composeFor, projectName, publicDomainFor, sshUpstreamFor, upstreamFor, type Context } from "./compose.ts";
-import { hostnameFor, type Manifest, type Mode } from "./manifest.ts";
-import { serveConfigFor } from "./tsserve.ts";
+import { backendFor, composeFor, projectName, publicDomainFor, sshUpstreamFor, upstreamFor, type Context } from "./compose.ts";
+import { hostnameFor, type Backend, type Manifest, type Mode } from "./manifest.ts";
+import { caddyfileFor, serveConfigFor } from "./tsserve.ts";
 import { emitYaml } from "./yaml.ts";
 
 export interface PlannedFile {
@@ -50,6 +50,8 @@ export interface Descriptor {
    * Écrit ici pour que le registre reste auto-descriptif — et c'est ce que lit
    * `up()` pour refuser deux cibles qui revendiqueraient le même domaine. */
   publicDomain: string | null;
+  /** Backend d'exposition effectivement résolu pour cette cible. */
+  backend: Backend;
 }
 
 export interface Plan {
@@ -68,6 +70,8 @@ export interface Plan {
   files: PlannedFile[];
   /** Domaine public résolu — `null` : cible strictement privée. */
   publicDomain: string | null;
+  /** Backend d'exposition résolu — quelle clé d'auth semer, entre autres. */
+  backend: Backend;
   /** Noms des services compagnons — `up` s'en sert pour signaler celui qui ne
    * démarre pas, que le contrôle de santé de l'app ne verrait jamais. */
   services: string[];
@@ -81,6 +85,7 @@ export function planFor(manifest: Manifest, targetName: string, ctx: Context): P
     throw new Error(`cible « ${targetName} » inconnue — connues : ${Object.keys(manifest.targets).join(", ")}`);
   }
 
+  const backend = backendFor(target, ctx, targetName);
   const publicDomain = publicDomainFor(target, ctx, targetName);
   const hostname = hostnameFor(manifest.name, targetName);
   const directory = `${ctx.root}/${manifest.name}/${targetName}`;
@@ -100,6 +105,7 @@ export function planFor(manifest: Manifest, targetName: string, ctx: Context): P
     autoDeploy: target.mode !== "workspace" && target.autoDeploy,
     services: target.mode === "workspace" ? [] : Object.keys(target.services),
     publicDomain,
+    backend,
   };
 
   const files: PlannedFile[] = [
@@ -114,10 +120,15 @@ export function planFor(manifest: Manifest, targetName: string, ctx: Context): P
         `${manifest.name} · cible ${targetName} · ${url}`,
       ]),
     },
-    {
-      path: `${directory}/serve.json`,
-      content: JSON.stringify(serveConfigFor(upstream, sshUpstream), null, 2) + "\n",
-    },
+    backend === "tailscale"
+      ? {
+          path: `${directory}/serve.json`,
+          content: JSON.stringify(serveConfigFor(upstream, sshUpstream), null, 2) + "\n",
+        }
+      : {
+          path: `${directory}/Caddyfile`,
+          content: caddyfileFor(hostname, ctx.tailnet, upstream),
+        },
     {
       path: `${directory}/ts.env`,
       mode: 0o600,
@@ -156,6 +167,7 @@ export function planFor(manifest: Manifest, targetName: string, ctx: Context): P
     files,
     publicDomain,
     services: descriptor.services,
+    backend,
   };
 }
 
