@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { listWorkspaces, removeTarget, resolveWorkspacePath } from "../src/actions.ts";
+import { listWorkspaces, removeTarget, resolveWorkspacePath, startTarget, stopTarget } from "../src/actions.ts";
 import type { Compose } from "../src/docker.ts";
 import type { Entry } from "../src/registry.ts";
 
@@ -26,6 +26,29 @@ function entry(): Entry {
     directory: "/home/serve/dbox/apps/budget/prod",
   };
 }
+
+describe("démarrer / couper une cible (dbox dev / down)", () => {
+  const avecCompose = () => {
+    const calls: string[][] = [];
+    const compose: Compose = async (directory, args) => {
+      calls.push([directory, ...args]);
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    return { calls, compose };
+  };
+
+  it("down coupe via compose stop, sans toucher au dossier", async () => {
+    const { calls, compose } = avecCompose();
+    await stopTarget(entry(), compose);
+    assert.deepEqual(calls, [["/home/serve/dbox/apps/budget/prod", "stop"]]);
+  });
+
+  it("dev démarre via compose start", async () => {
+    const { calls, compose } = avecCompose();
+    await startTarget(entry(), compose);
+    assert.deepEqual(calls, [["/home/serve/dbox/apps/budget/prod", "start"]]);
+  });
+});
 
 describe("suppression d'une cible", () => {
   it("arrête via compose down, puis supprime le dossier généré", async () => {

@@ -60,16 +60,26 @@ interface Published {
  * Un service compagnon : une base, un cache, une file — ce dont l'app a besoin
  * à côté d'elle. L'app le joint par son nom sur le réseau interne (`db:5432`).
  *
- * Volontairement pauvre : une image toute faite et, au plus, un volume nommé.
- * Pas de commande, pas de build, pas de ports, pas de montage de l'hôte —
- * c'est cette impossibilité d'exprimer un chemin hôte qui préserve
- * l'invariant 7 (aucune app ne peut réclamer le socket Docker). Au-delà, la
- * réponse est d'écrire son propre compose : DBox est jetable, c'est prévu.
+ * Volontairement pauvre : une image toute faite, au plus un volume nommé, une
+ * commande et un contrôle de santé. Pas de build, pas de ports, **pas de montage
+ * de l'hôte** — c'est cette impossibilité d'exprimer un chemin hôte qui préserve
+ * l'invariant 7 (aucune app ne peut réclamer le socket Docker). `command` et
+ * `healthcheck` s'exécutent dans le conteneur du compagnon, jamais sur l'hôte :
+ * ils n'ouvrent aucune surface. Au-delà, la réponse reste d'écrire son propre
+ * compose : DBox est jetable, c'est prévu.
  */
 export interface CompanionService {
   image: string;
   /** Chemin dans le conteneur, monté sur un volume nommé. `null` : sans état. */
   data: string | null;
+  /** Commande du conteneur (ex. `postgres -c max_connections=200`). `null` :
+   * l'entrypoint par défaut de l'image. */
+  command: string | null;
+  /** Commande de santé exécutée dans le conteneur (ex. `pg_isready -U app`).
+   * Quand elle est posée, l'app attend que ce compagnon soit **sain** avant de
+   * démarrer (`depends_on: condition: service_healthy`), pas seulement lancé.
+   * `null` : pas de contrôle de santé, l'app ne fait que l'attendre démarré. */
+  healthcheck: string | null;
 }
 
 /**
@@ -220,7 +230,7 @@ const BACKENDS: readonly Backend[] = ["tailscale", "headscale"];
 const SERVICES_RESERVES: readonly string[] = ["app", "tailscale", "caddy"];
 
 /** Les seules clés qu'un compagnon accepte — voir `CompanionService`. */
-const CLES_COMPAGNON: readonly string[] = ["image", "data"];
+const CLES_COMPAGNON: readonly string[] = ["image", "data", "command", "healthcheck"];
 
 const DEFAULT_DEV_IMAGE = "node:24-bookworm-slim";
 const DEFAULT_DOCKERFILE = "Dockerfile";
@@ -318,6 +328,8 @@ export function serializeManifest(manifest: Manifest): string {
       for (const [nom, service] of Object.entries(target.services)) {
         lines.push("", `[targets.${name}.services.${nom}]`, `image = ${str(service.image)}`);
         if (service.data !== null) lines.push(`data = ${str(service.data)}`);
+        if (service.command !== null) lines.push(`command = ${str(service.command)}`);
+        if (service.healthcheck !== null) lines.push(`healthcheck = ${str(service.healthcheck)}`);
       }
     }
 
@@ -426,8 +438,19 @@ function parseServices(
     }
 
     const data = parseDataPath((brut as TomlTable)["data"], `${chemin}.data`, fail);
+    const lireChaine = (cle: string): string | null => {
+      const v = (brut as TomlTable)[cle];
+      if (v === undefined) return null;
+      if (typeof v !== "string" || v === "") fail(`${chemin}.${cle}`, `« ${cle} » doit être une chaîne non vide`);
+      return v as string;
+    };
 
-    services[nom] = { image: image as string, data };
+    services[nom] = {
+      image: image as string,
+      data,
+      command: lireChaine("command"),
+      healthcheck: lireChaine("healthcheck"),
+    };
   }
 
   return services;

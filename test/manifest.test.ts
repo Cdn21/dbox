@@ -291,13 +291,26 @@ data = "/var/lib/postgresql/data"
 
   it("lit image et data", () => {
     assert.deepEqual(compagnons(AVEC_DB), {
-      db: { image: "postgres:16-alpine", data: "/var/lib/postgresql/data" },
+      db: { image: "postgres:16-alpine", data: "/var/lib/postgresql/data", command: null, healthcheck: null },
     });
   });
 
   it("data est optionnel : un cache n'a rien à garder", () => {
     const s = compagnons(`name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\n[targets.prod.services.cache]\nimage = "redis:7-alpine"\n`);
-    assert.deepEqual(s, { cache: { image: "redis:7-alpine", data: null } });
+    assert.deepEqual(s, { cache: { image: "redis:7-alpine", data: null, command: null, healthcheck: null } });
+  });
+
+  it("lit command et healthcheck, et permet l'aller-retour", () => {
+    const src = `name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\n[targets.prod.services.db]\nimage = "postgres:16"\ndata = "/var/lib/postgresql/data"\ncommand = "postgres -c max_connections=200"\nhealthcheck = "pg_isready -U app"\n`;
+    assert.deepEqual(compagnons(src), {
+      db: {
+        image: "postgres:16",
+        data: "/var/lib/postgresql/data",
+        command: "postgres -c max_connections=200",
+        healthcheck: "pg_isready -U app",
+      },
+    });
+    assert.match(serializeManifest(parseManifest(src)), /command = "postgres -c max_connections=200"[\s\S]*healthcheck = "pg_isready -U app"/);
   });
 
   it("marche aussi en devcontainer", () => {
@@ -337,10 +350,10 @@ data = "/var/lib/postgresql/data"
   });
 
   it("refuse une clé inconnue plutôt que de l'ignorer", () => {
-    // Sans ça, un `command` ou un `ports` écrit ici disparaîtrait en silence.
+    // Sans ça, un `restart` ou un `user` écrit ici disparaîtrait en silence.
     refuses(
-      `name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\n[targets.prod.services.db]\nimage = "x"\ncommand = "postgres"\n`,
-      "clé « command » inattendue dans un service",
+      `name = "a"\n[targets.prod]\nmode = "deployed"\nport = 80\n[targets.prod.services.db]\nimage = "x"\nrestart = "always"\n`,
+      "clé « restart » inattendue dans un service",
     );
   });
 

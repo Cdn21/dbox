@@ -152,6 +152,42 @@ image = "redis:7-alpine"
     assert.equal(db["image"], "postgres:16-alpine");
   });
 
+  const RICHE = parseManifest(`
+name = "api"
+
+[targets.prod]
+mode = "deployed"
+port = 8080
+
+[targets.prod.services.db]
+image = "postgres:16"
+data = "/var/lib/postgresql/data"
+command = "postgres -c max_connections=200"
+healthcheck = "pg_isready -U app"
+
+[targets.prod.services.cache]
+image = "redis:7-alpine"
+`);
+
+  it("rend le healthcheck et la commande d'un compagnon riche", () => {
+    const db = servicesDe(RICHE)["db"];
+    assert.deepEqual(db["command"], ["postgres", "-c", "max_connections=200"]); // forme exec, argv[0] = postgres
+    assert.deepEqual(db["healthcheck"]["test"], ["CMD-SHELL", "pg_isready -U app"]);
+    assert.equal(db["healthcheck"]["retries"], 5);
+    assert.equal(servicesDe(RICHE)["cache"]["healthcheck"], undefined); // pas de contrôle = pas de clé
+  });
+
+  it("l'app attend un compagnon sain (service_healthy), les autres seulement lancés", () => {
+    assert.deepEqual(servicesDe(RICHE)["app"]["depends_on"], {
+      db: { condition: "service_healthy" },
+      cache: { condition: "service_started" },
+    });
+  });
+
+  it("garde l'invariant 1 : aucun ports: même avec un compagnon riche", () => {
+    for (const s of Object.values(servicesDe(RICHE))) assert.equal((s as any)["ports"], undefined);
+  });
+
   it("un compagnon n'est jamais exposé, même quand la cible est publique", () => {
     const publique = parseManifest(`
 name = "budget"

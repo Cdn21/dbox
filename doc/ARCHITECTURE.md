@@ -286,13 +286,12 @@ Aucune clé vers les machines n'entre dans la CI : ce sont les machines qui tire
 
 ## 11. Limites connues et évolutions
 
-- **Applications multi-conteneurs riches** : les compagnons n'ont que `image` et
-  `data`. Pas de `depends_on` conditionnel, de commande ni de build — une app qui
-  en a besoin écrit son propre Compose.
+- **Applications multi-conteneurs riches** : un compagnon a `image`, `data`,
+  `command` et `healthcheck` (l'app attend alors `service_healthy`), mais **pas de
+  build** — une app qui a besoin d'un conteneur à construire écrit son propre Compose.
 - **Mode `workspace`** : hors de portée du daemon d'une autre machine (le
   serveur de dev tourne sur le poste).
 - **`ssh_port` et `public_domain`** ne se combinent pas encore.
 - **Désenregistrer un nœud Tailscale** à la suppression d'une cible demanderait
   le token d'API dans le daemon, ce que D7 évite ; les nœuds abandonnés sont
   seulement signalés.
-- **`dbox dev` / `dbox down`** : annoncés, pas encore écrits.

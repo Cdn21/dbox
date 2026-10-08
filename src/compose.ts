@@ -180,10 +180,9 @@ export function composeFor(manifest: Manifest, targetName: string, ctx: Context)
 
   // Le mode workspace ne porte pas de compagnons (voir `Companioned`).
   const compagnons = target.mode === "workspace" ? {} : target.services;
-  const noms = Object.keys(compagnons);
 
   const services: YamlMap = {};
-  const app = appService(manifest.name, target, ctx, user, project, publicDomain, noms);
+  const app = appService(manifest.name, target, ctx, user, project, publicDomain, compagnons);
   if (app !== undefined) services["app"] = app;
   for (const [nom, compagnon] of Object.entries(compagnons)) {
     services[nom] = companionService(nom, compagnon);
@@ -223,7 +222,7 @@ function appService(
   user: string,
   project: string,
   publicDomain: string | null,
-  compagnons: string[],
+  compagnons: Record<string, CompanionService>,
 ): YamlMap | undefined {
   // En mode `workspace`, la commande tourne sur l'hôte : rien à conteneuriser.
   if (target.mode === "workspace") return undefined;
@@ -289,21 +288,50 @@ function companionService(nom: string, service: CompanionService): YamlMap {
     restart: "unless-stopped",
     networks: ["internal"],
   };
+  // Découpé en arguments (forme exec), **jamais** enveloppé dans `sh -lc` comme
+  // la commande d'un devcontainer : une image toute faite a un entrypoint qui
+  // s'appuie sur argv[0] (postgres bascule de root à son user quand argv[0] vaut
+  // « postgres » ; un `sh` à la place le ferait tourner en root et refuser de
+  // démarrer). Découpage simple sur les espaces : des arguments de réglage, pas
+  // du shell — pour davantage, c'est le signe qu'il faut son propre Compose.
+  if (service.command !== null) rendu["command"] = service.command.split(/\s+/).filter((a) => a !== "");
   // Nommé d'après le service : deux compagnons qui stockent ne se marchent
   // jamais dessus, et aucun ne peut réclamer `data`, qui est à l'app.
   if (service.data !== null) rendu["volumes"] = [`${nom}-data:${service.data}`];
+  // Un contrôle de santé rend `depends_on: service_healthy` possible côté app.
+  // Temporisations fixes : le manifeste reste pauvre, l'app n'a qu'une commande
+  // à donner. `CMD-SHELL` pour qu'une commande composée passe telle quelle.
+  if (service.healthcheck !== null) {
+    rendu["healthcheck"] = {
+      test: ["CMD-SHELL", service.healthcheck],
+      interval: "10s",
+      timeout: "5s",
+      retries: 5,
+      start_period: "30s",
+    };
+  }
   return rendu;
 }
 
 /**
- * L'app démarre après ses compagnons. Sans `condition` : aucun healthcheck
- * n'étant disponible sur une image toute faite, Docker ne peut garantir que
- * « lancé », pas « prêt ». C'est donc à l'app de réessayer sa connexion — ce
- * qu'elle devrait faire de toute façon, un redémarrage de base la lui
- * imposerait aussi.
+ * L'app démarre après ses compagnons. Un compagnon qui déclare un `healthcheck`
+ * est attendu **sain** (`condition: service_healthy`), les autres seulement
+ * **lancés** (`service_started`) — pour ceux-là c'est à l'app de réessayer sa
+ * connexion, ce qu'elle devrait faire de toute façon. Tant qu'aucun compagnon
+ * n'a de contrôle de santé, on garde la **forme liste** historique, inchangée.
  */
-function dependre(service: YamlMap, compagnons: string[]): void {
-  if (compagnons.length > 0) service["depends_on"] = [...compagnons];
+function dependre(service: YamlMap, compagnons: Record<string, CompanionService>): void {
+  const noms = Object.keys(compagnons);
+  if (noms.length === 0) return;
+  if (noms.every((nom) => compagnons[nom]!.healthcheck === null)) {
+    service["depends_on"] = [...noms];
+    return;
+  }
+  const map: YamlMap = {};
+  for (const nom of noms) {
+    map[nom] = { condition: compagnons[nom]!.healthcheck !== null ? "service_healthy" : "service_started" };
+  }
+  service["depends_on"] = map;
 }
 
 /**

@@ -21,7 +21,7 @@ import { httpProbe, pinnedHttpProbe } from "./health.ts";
 import { ManifestError, parseManifest, type Manifest } from "./manifest.ts";
 import { planFor, type Plan } from "./plan.ts";
 import { listDescriptors, PS_ARGS, scan, since, type Entry } from "./registry.ts";
-import { addApp, addLocalApp, listWorkspaces, redeploy, removeTarget, resolveWorkspacePath } from "./actions.ts";
+import { addApp, addLocalApp, listWorkspaces, redeploy, removeTarget, resolveWorkspacePath, startTarget, stopTarget } from "./actions.ts";
 import { readAuthkeyNotice } from "./authkey.ts";
 import { certExpiryFromPem, certNotice, readCertExpiry, type CertNotice } from "./cert.ts";
 import { lireSiFichierOrdinaire } from "./lecture.ts";
@@ -43,7 +43,7 @@ import { TomlError } from "./toml.ts";
 import { up } from "./up.ts";
 import { seedAuthKey, writeFiles } from "./writer.ts";
 
-const USAGE = `dbox <setup|add|init|plan|up|rm|ls|serve|rotate-authkey> [dossier|url|app] [options]
+const USAGE = `dbox <setup|add|init|plan|up|dev|down|rm|ls|serve|rotate-authkey> [dossier|url|app] [options]
 
   --version         la version de cette copie de DBox
   setup             configure cette machine une fois pour toutes (interactif)
@@ -52,6 +52,8 @@ const USAGE = `dbox <setup|add|init|plan|up|rm|ls|serve|rotate-authkey> [dossier
   init              écrit un dbox.toml à partir du dossier et de son Dockerfile
   plan              affiche les fichiers générés, sans rien toucher
   up                déploie : construit, démarre, vérifie, revient en arrière si échec
+  dev <app>         (re)démarre la cible dev d'une app déjà déployée
+  down <app>        coupe une cible déjà déployée (sans la supprimer) ; --target si plusieurs
   rm <app>          arrête et supprime une cible déployée ; source et volumes intacts
   ls                inventaire des cibles déployées et de leur état
   serve             daemon HTTP : la même liste, dans un navigateur (lecture seule)
@@ -194,10 +196,14 @@ async function main(argv: string[]): Promise<number> {
     process.stdout.write(iso ?? "null");
     return iso === null ? 1 : 0;
   }
-  if (!["setup", "doctor", "add", "init", "plan", "up", "rm", "ls", "serve", "rotate-authkey"].includes(command)) {
+  if (!["setup", "doctor", "add", "init", "plan", "up", "rm", "ls", "dev", "down", "serve", "rotate-authkey"].includes(command)) {
     process.stderr.write(`commande inconnue « ${command} »\n\n${USAGE}`);
     return 1;
   }
+
+  // Les commandes qui n'interrogent que le registre existant — ni manifeste, ni
+  // dossier source, ni URL à construire — n'ont pas besoin du tailnet ni de Traefik.
+  const registreSeul = command === "ls" || command === "rm" || command === "dev" || command === "down";
 
   // Ni manifeste, ni configuration à charger : c'est justement elle qu'on écrit.
   if (command === "setup") return await runSetup();
@@ -216,7 +222,7 @@ async function main(argv: string[]): Promise<number> {
   // page — trois endroits où l'erreur est difficile à rattacher à sa cause.
   // `add` déploie, donc il est concerné lui aussi. `rm` ne construit aucune
   // URL — il n'interroge que le registre existant.
-  if (command !== "ls" && command !== "rm" && options.tailnet.includes("<")) {
+  if (!registreSeul && options.tailnet.includes("<")) {
     process.stderr.write(
       "tailnet inconnu : précise --tailnet <nom>.ts.net ou pose $DBOX_TAILNET\n",
     );
@@ -226,8 +232,7 @@ async function main(argv: string[]): Promise<number> {
   // Un seul des deux posé est une faute de saisie, à signaler tout de suite
   // plutôt qu'un « traefik non configuré » vague au premier déploiement public.
   if (
-    command !== "ls" &&
-    command !== "rm" &&
+    !registreSeul &&
     (options.traefikNetwork === undefined) !== (options.traefikCertResolver === undefined)
   ) {
     process.stderr.write("--traefik-network et --traefik-cert-resolver se posent ensemble, ou pas du tout\n");
@@ -239,6 +244,8 @@ async function main(argv: string[]): Promise<number> {
   // `ls`, `rm` et `serve` interrogent le registre : ni manifeste ni dossier source.
   if (command === "ls") return await runLs(options);
   if (command === "rm") return await runRm(options);
+  if (command === "down") return await runDown(options);
+  if (command === "dev") return await runDev(options);
   if (command === "serve") return await runServe(options);
   if (command === "rotate-authkey") return await runRotateAuthkey(options);
 
@@ -624,38 +631,54 @@ async function runLs(options: Options): Promise<number> {
  * confirmation, cette commande le fait derrière une autre, ou `--yes` pour un
  * script.
  */
-async function runRm(options: Options): Promise<number> {
+/**
+ * Résout l'`Entry` d'une cible depuis le registre, pour les commandes qui
+ * agissent sur une cible déjà déployée (`rm`, `down`, `dev`) : un nom d'app, et
+ * `--target` si plusieurs — sinon l'unique. `cibleImposee` force la cible (`dev`
+ * ne vise qu'elle). Écrit le message et rend `null` quand la résolution échoue.
+ */
+async function resoudreCible(options: Options, commande: string, cibleImposee?: string): Promise<Entry | null> {
   const appName = options.directory;
   if (appName === ".") {
-    process.stderr.write("dbox rm attend un nom d'app\n");
-    return 1;
+    process.stderr.write(`dbox ${commande} attend un nom d'app\n`);
+    return null;
   }
 
   const entries = await scan(options.root, async () => (await run("docker", PS_ARGS)).stdout);
   const matches = entries.filter((entry) => entry.descriptor.app === appName);
   if (matches.length === 0) {
     process.stderr.write(`aucune cible « ${appName} » sous ${options.root}\n`);
-    return 1;
+    return null;
   }
 
-  let entry: Entry;
-  if (options.target !== undefined) {
-    const found = matches.find((candidate) => candidate.descriptor.target === options.target);
+  const cible = cibleImposee ?? options.target;
+  if (cible !== undefined) {
+    const found = matches.find((candidate) => candidate.descriptor.target === cible);
     if (found === undefined) {
       process.stderr.write(
-        `cible « ${options.target} » absente pour ${appName} (${matches.map((m) => m.descriptor.target).join(", ")})\n`,
+        `cible « ${cible} » absente pour ${appName} (${matches.map((m) => m.descriptor.target).join(", ")})\n`,
       );
-      return 1;
+      return null;
     }
-    entry = found;
-  } else if (matches.length === 1) {
-    entry = matches[0]!;
-  } else {
-    process.stderr.write(
-      `plusieurs cibles pour ${appName} (${matches.map((m) => m.descriptor.target).join(", ")}) — précise --target\n`,
-    );
-    return 1;
+    return found;
   }
+  if (matches.length === 1) return matches[0]!;
+  process.stderr.write(
+    `plusieurs cibles pour ${appName} (${matches.map((m) => m.descriptor.target).join(", ")}) — précise --target\n`,
+  );
+  return null;
+}
+
+/** Le journal en direct de `docker compose`, préfixé comme ailleurs. */
+function composeAvecJournal(): ReturnType<typeof composeRunner> {
+  return composeRunner((line) => {
+    if (line.trim() !== "") process.stdout.write(`  │ ${line}\n`);
+  });
+}
+
+async function runRm(options: Options): Promise<number> {
+  const entry = await resoudreCible(options, "rm");
+  if (entry === null) return 1;
 
   if (!options.yes) {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -670,16 +693,50 @@ async function runRm(options: Options): Promise<number> {
     }
   }
 
-  const compose = composeRunner((line) => {
-    if (line.trim() !== "") process.stdout.write(`  │ ${line}\n`);
-  });
-  const result = await removeTarget(entry, compose, (path) => rm(path, { recursive: true, force: true }));
+  const result = await removeTarget(entry, composeAvecJournal(), (path) => rm(path, { recursive: true, force: true }));
   if (result.code !== 0) {
     process.stderr.write(`${result.stderr || result.stdout}\n`);
     return 1;
   }
 
   process.stdout.write(`supprimé ${entry.directory}\n`);
+  return 0;
+}
+
+/**
+ * `dbox down <app> [--target]` : coupe une cible déjà déployée (`compose stop`),
+ * sans la supprimer. Pas de confirmation — un arrêt se rejoue par `dbox dev` ou
+ * `up`, contrairement à `rm`.
+ */
+async function runDown(options: Options): Promise<number> {
+  const entry = await resoudreCible(options, "down");
+  if (entry === null) return 1;
+
+  const result = await stopTarget(entry, composeAvecJournal());
+  if (result.code !== 0) {
+    process.stderr.write(`${result.stderr || result.stdout}\n`);
+    return 1;
+  }
+  process.stdout.write(`coupé ${entry.descriptor.app}/${entry.descriptor.target}\n`);
+  return 0;
+}
+
+/**
+ * `dbox dev <app>` : (re)démarre la cible `dev` d'une app déjà déployée
+ * (`compose start`). Raccourci — la cible `dev` est son unique objet, d'où le
+ * nom de la commande. Démarre les conteneurs gérés par Compose ; un mode
+ * `workspace` (serveur de dev sur l'hôte) n'a rien que Compose puisse lancer.
+ */
+async function runDev(options: Options): Promise<number> {
+  const entry = await resoudreCible(options, "dev", "dev");
+  if (entry === null) return 1;
+
+  const result = await startTarget(entry, composeAvecJournal());
+  if (result.code !== 0) {
+    process.stderr.write(`${result.stderr || result.stdout}\n`);
+    return 1;
+  }
+  process.stdout.write(`démarré ${entry.descriptor.app}/${entry.descriptor.target} · ${entry.descriptor.url}\n`);
   return 0;
 }
 

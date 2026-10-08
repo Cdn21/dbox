@@ -12,10 +12,10 @@ dbox up ~/code/my-app      # build, start, health-check → https://my-app.your-
 ```
 
 > **Status.** DBox is a personal tool, published as is. It runs daily on two
-> machines, has more than 550 tests and 17 invariants guarded by them — but it has one
-> maintainer, runs on **Linux only**, works with **Tailscale only** (Headscale is
-> planned), and its command line and docs **speak French**. This README is the
-> English entry point; the full documentation is in [`doc/`](doc/README.md).
+> machines, has more than 600 tests and 17 invariants guarded by them — but it has one
+> maintainer, runs on **Linux only**, exposes apps through **Tailscale** or a
+> self-hosted **Headscale**, and its command line and docs **speak French**. This
+> README is the English entry point; the full documentation is in [`doc/`](doc/README.md).
 
 ## Why DBox
 
@@ -77,7 +77,7 @@ dbox setup        # writes ~/.config/dbox/config.toml for this machine
 The `dbox` command runs inside a container: Docker is the only thing you need
 on the host. To use the published image instead of building it, pick a
 [release](https://github.com/Cdn21/dbox/releases):
-`DBOX_IMAGE=ghcr.io/cdn21/dbox:1.4.0 ./install.sh` (amd64 and arm64). `dbox setup` asks five questions, in French:
+`DBOX_IMAGE=ghcr.io/cdn21/dbox:1.5.0 ./install.sh` (amd64 and arm64). `dbox setup` asks five questions, in French:
 
 | prompt | meaning | default |
 | --- | --- | --- |
@@ -119,6 +119,10 @@ en ligne · https://my-app.your-tailnet.ts.net
 Your code is in a git repository? `dbox add git@github.com:you/my-app.git`
 clones, writes the manifest if needed, and deploys.
 
+Already deployed? `dbox down <app>` stops a target without removing it, and
+`dbox dev <app>` starts its `dev` target back up — no rebuild, the same actions
+the dashboard offers as buttons.
+
 ### 4. The dashboard (optional)
 
 A web page listing your apps — redeploy, stop, edit environment variables, read
@@ -142,7 +146,7 @@ The daemon runs as UID 1000; set `DBOX_UID`/`DBOX_GID` in `.env` if yours
 differ. By default any identity your tailnet lets reach the node has full
 access; set `DBOX_ALLOWED_USERS` (comma-separated Tailscale logins) in `.env`
 to restrict the dashboard to yourself — recommended, as a second barrier behind
-the tailnet ACL. With a published image, add `DBOX_IMAGE=ghcr.io/cdn21/dbox:1.4.0` to
+the tailnet ACL. With a published image, add `DBOX_IMAGE=ghcr.io/cdn21/dbox:1.5.0` to
 `.env` and `docker pull` it first: DBox never pulls an image implicitly. Every other setting is documented at the top of
 `deploy/docker-compose.yml`.
 
@@ -164,9 +168,11 @@ health = "/healthz"       # → https://budget.your-tailnet.ts.net
 
 Three modes: `deployed` (built image), `devcontainer` (your command in a
 container, sources mounted, hot reload) and `workspace` (your command directly
-on the host). Companion services, per-target ACL tags, public exposure through
-an existing Traefik, and auto-deploy by polling (never a webhook) are described
-in [`doc/REFERENCE.md`](doc/REFERENCE.md).
+on the host). Companion services (a database beside your app — started before
+it, and awaited *healthy* when it declares a health check), per-target ACL tags,
+a self-hosted **Headscale** backend as an alternative to Tailscale (per machine
+or per target), public exposure through an existing Traefik, and auto-deploy by
+polling (never a webhook) are described in [`doc/REFERENCE.md`](doc/REFERENCE.md).
 
 ## When something goes wrong
 

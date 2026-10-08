@@ -249,16 +249,25 @@ port = 8080
 [targets.prod.services.db]
 image = "postgres:16-alpine"
 data = "/var/lib/postgresql/data"
+command = "postgres -c max_connections=200"   # optionnel : la commande du conteneur
+healthcheck = "pg_isready -U app"             # optionnel : l'app attend qu'il soit SAIN
 ```
 
 L'app la joint par son nom sur le réseau interne : `db:5432`. Rien n'est publié, et
 un compagnon n'est **jamais** exposé — ni port, ni label de reverse proxy, même quand
 la cible est publique. Seule l'app l'est.
 
-Volontairement pauvre : `image` et `data`, rien d'autre. Pas de commande, pas de
-build, et surtout **aucun montage de l'hôte** — c'est cette impossibilité qui garantit
-qu'une app ne peut pas réclamer le socket Docker. Pour davantage, écris ton propre
-`docker-compose.yml` : DBox est jetable, c'est prévu pour.
+Volontairement pauvre : `image`, `data`, et au plus `command` et `healthcheck` —
+**pas de build, aucun montage de l'hôte**, c'est cette impossibilité qui garantit
+qu'une app ne peut pas réclamer le socket Docker. `command` et `healthcheck`
+s'exécutent dans le conteneur du compagnon, jamais sur l'hôte. Pour un conteneur à
+construire, écris ton propre `docker-compose.yml` : DBox est jetable, c'est prévu.
+
+Un `healthcheck` posé change la dépendance : sans lui, l'app démarre dès que le
+compagnon est **lancé** (`service_started`), à elle de réessayer sa connexion ;
+avec lui, l'app attend qu'il soit **sain** (`service_healthy`) — c'est ce qu'il faut
+pour une base qui met une seconde à accepter les connexions, et ce qui permet à une
+app comme `appvc_api` de se poser sur DBox sans Compose écrit à la main.
 
 Trois choses à savoir :
 
@@ -326,8 +335,8 @@ dbox doctor        # vérifie les prérequis de la machine, sans rien modifier
 dbox ls            # ce qui tourne, où, depuis quand, avec quelle URL
 dbox serve         # le daemon : la même chose dans un navigateur
 dbox rotate-authkey # régénère authkey_file via l'API si l'échéance approche
-dbox dev           # démarre la cible dev  → https://budget-dev.…         (à venir)
-dbox down dev      # coupe une cible                                      (à venir)
+dbox dev <app>     # (re)démarre la cible dev     → https://budget-dev.…
+dbox down <app>    # coupe une cible (sans supprimer) ; --target si plusieurs
 ```
 
 Ajouter une app tient en une commande, sans option et sans clé à manipuler.
@@ -727,8 +736,6 @@ propre Compose.
 
 ### À venir
 
-- **`dbox dev` / `dbox down`** — démarrer et couper une cible depuis la CLI sans passer
-  par `up` ; les trois modes existent déjà dans le manifeste et le tableau de bord.
 - **`ssh_port` combiné à `public_domain`** — refusé pour l'instant.
 
 ---

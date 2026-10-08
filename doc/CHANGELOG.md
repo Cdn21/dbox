@@ -6,6 +6,21 @@ All notable changes to DBox. The format follows
 `deploy/` setup that works with one version keeps working with every later
 version of the same major.
 
+## [1.5.0] — 2026-10-08
+
+### Added
+
+- **Start and stop a target from the command line.** `dbox down <app>` stops a
+  deployed target without removing it (its data volumes and source stay
+  untouched); `dbox dev <app>` starts its `dev` target back up. No rebuild — the
+  same actions the dashboard already offered as buttons, now on the CLI too
+  (`--target` picks one when an app has several targets).
+- **Richer companion services.** A companion (a database beside your app) can now
+  declare a `command` and a `healthcheck`. With a health check, your app waits for
+  the companion to be *healthy* before it starts (`depends_on: service_healthy`),
+  not merely started — what a database that takes a moment to accept connections
+  needs. Without one, behaviour is unchanged.
+
 ## [1.4.0] — 2026-10-07
 
 ### Added
@@ -160,6 +175,7 @@ First public version: `dbox.toml`, the three modes (`deployed`, `devcontainer`,
 with rollback, the dashboard, `dbox add` from git, SSH deploy keys, Tailscale
 auth key rotation, stale node and ACL tag reports.
 
+[1.5.0]: https://github.com/Cdn21/dbox/releases/tag/v1.5.0
 [1.4.0]: https://github.com/Cdn21/dbox/releases/tag/v1.4.0
 [1.3.1]: https://github.com/Cdn21/dbox/releases/tag/v1.3.1
 [1.3.0]: https://github.com/Cdn21/dbox/releases/tag/v1.3.0

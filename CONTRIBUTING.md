@@ -21,7 +21,7 @@ et se copient à la main si besoin.
 
 ```bash
 export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"   # node n'est PAS dans le PATH d'un shell non interactif
-node --test test/*.test.ts                          # 644 tests, ~800 ms
+node --test test/*.test.ts                          # 650 tests, ~800 ms
 npm run typecheck                                    # tsc --noEmit ; npm install d'abord si node_modules manque
 node src/cli.ts plan examples/budget --tailnet mon-tailnet.ts.net
 node src/cli.ts up <dossier> --target prod          # nécessite Docker + le tailnet
@@ -99,7 +99,7 @@ node src/cli.ts rm <app> --root ... [--target <cible>] [--yes]  # arrête et sup
 | `ui/reglages.ts` | `/settings` — presque tout en lecture seule |
 | `ui/page.ts` | la page d'accueil ; elle n'assemble que |
 | `vendor.ts` | htmx et Alpine vendorisés (`src/vendor/`), servis par le daemon lui-même |
-| `cli.ts` | `setup`, `doctor`, `init`, `plan`, `up`, `ls`, `add`, `rm`, `serve`, `rotate-authkey` |
+| `cli.ts` | `setup`, `doctor`, `init`, `plan`, `up`, `dev`, `down`, `ls`, `add`, `rm`, `serve`, `rotate-authkey` |
 
 ## Invariants — un test garde chacun, ne pas les casser
 

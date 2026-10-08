@@ -658,7 +658,16 @@ async function saveManifestRoute(entry: Entry, body: string, actions: Actions): 
 
     const services = parseServices(form);
     if (!services.ok) return html(actionResult(false, services.detail, false));
-    changes.services = services.services;
+    // Le formulaire ne couvre que nom/image/data : on préserve `command` et
+    // `healthcheck` que le dbox.toml portait pour un compagnon de même nom,
+    // plutôt que de les effacer en silence à chaque enregistrement.
+    const courants = current.services; // non-workspace ici : les compagnons existent
+    changes.services = Object.fromEntries(
+      Object.entries(services.services).map(([nom, svc]) => {
+        const ancien = courants[nom];
+        return [nom, { image: svc.image, data: svc.data, command: ancien?.command ?? null, healthcheck: ancien?.healthcheck ?? null }];
+      }),
+    );
   }
 
   try {
